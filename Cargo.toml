@@ -1,0 +1,28 @@
+[package]
+name = "rotfall"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+glam = "0.34.2"
+png = "0.18.1"
+pollster = "1.0.1"
+# Vulkan and OpenGL only. DirectX 12 is deliberately left out of the build.
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "gles", "wgsl"] }
+winit = "0.30.13"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+debug = false
