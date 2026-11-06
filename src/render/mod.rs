@@ -116,7 +116,29 @@ pub struct MenuView {
     pub logo: [f32; 4],
     /// How strongly to shade the side the menu sits on, 0..1.
     pub dim: f32,
+    /// A gallery picture to show in the logo's place, as an index into `GALLERY`.
+    pub gallery: Option<usize>,
 }
+
+/// The pictures in the Extras menu: size, caption.
+pub const GALLERY: [(f32, f32, &str); 7] = [
+    (1920.0, 1080.0, "THE MENU ART. RENDERED IN BLENDER, FROM A SCRIPT"),
+    (600.0, 600.0, "KEY ART: THE LOGO IS REAL GEOMETRY IN THE SCENE"),
+    (960.0, 540.0, "THE HORDE AT WAVE 12"),
+    (960.0, 540.0, "A TITAN DOWN THE ROAD"),
+    (960.0, 540.0, "QUIET BEFORE THE FIRST WAVE"),
+    (1400.0, 400.0, "THE LOGO"),
+    (256.0, 256.0, "THE ICON"),
+];
+const GALLERY_FILES: [&[u8]; 7] = [
+    include_bytes!("../../assets/menu_bg.png"),
+    include_bytes!("../../assets/thumbnail_600x600.png"),
+    include_bytes!("../../assets/gallery_horde.png"),
+    include_bytes!("../../assets/gallery_titan.png"),
+    include_bytes!("../../assets/gallery_base.png"),
+    include_bytes!("../../assets/menu_logo.png"),
+    include_bytes!("../../assets/icon_256.png"),
+];
 
 /// Everything the game hands to the renderer for one frame.
 pub struct FrameData {
@@ -358,6 +380,8 @@ pub struct Renderer {
 struct MenuArt {
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
+    /// Same as `bind`, but with a gallery picture in the logo's slot.
+    gallery: Vec<wgpu::BindGroup>,
     bg_pipe: wgpu::RenderPipeline,
     logo_pipe: wgpu::RenderPipeline,
     aspect: f32,
@@ -1408,6 +1432,9 @@ impl Renderer {
             pass.set_pipeline(&art.bg_pipe);
             pass.draw(0..3, 0..1);
             if menu.logo[2] > 0.0 {
+                if let Some(g) = menu.gallery.and_then(|i| art.gallery.get(i)) {
+                    pass.set_bind_group(0, g, &[]);
+                }
                 pass.set_pipeline(&art.logo_pipe);
                 pass.draw(0..6, 0..1);
             }
@@ -1512,6 +1539,7 @@ fn build_menu_art(
     let device = &gpu.device;
     let (bg, aspect) = upload_art(gpu, "menu background", include_bytes!("../../assets/menu_bg.png"));
     let (logo, _) = upload_art(gpu, "menu logo", include_bytes!("../../assets/menu_logo.png"));
+    let pictures: Vec<wgpu::TextureView> = GALLERY_FILES.iter().map(|f| upload_art(gpu, "gallery", f).0).collect();
     let uniform = dyn_buffer(device, "menu uniform", 48, wgpu::BufferUsages::UNIFORM);
     let float = wgpu::TextureSampleType::Float { filterable: true };
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1525,18 +1553,22 @@ fn build_menu_art(
             sampler_entry(5, St::FRAGMENT, wgpu::SamplerBindingType::Filtering),
         ],
     });
-    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("menu"),
-        layout: &layout,
-        entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&bg) },
-            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&logo) },
-            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(detail) },
-            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(clamp) },
-            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(wrap) },
-        ],
-    });
+    let make_bind = |image: &wgpu::TextureView| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("menu"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&bg) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(image) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(detail) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(clamp) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(wrap) },
+            ],
+        })
+    };
+    let bind = make_bind(&logo);
+    let gallery = pictures.iter().map(&make_bind).collect();
     let sh = device.create_shader_module(wgpu::include_wgsl!("menu.wgsl"));
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
     let pipe = |vs: &str, fs: &str, blend: Option<wgpu::BlendState>| {
@@ -1559,7 +1591,7 @@ fn build_menu_art(
     };
     let bg_pipe = pipe("vs_bg", "fs_bg", None);
     let logo_pipe = pipe("vs_logo", "fs_logo", Some(blend));
-    MenuArt { uniform, bind, bg_pipe, logo_pipe, aspect }
+    MenuArt { uniform, bind, gallery, bg_pipe, logo_pipe, aspect }
 }
 
 fn color_pass<'e>(enc: &'e mut wgpu::CommandEncoder, label: &str, view: &wgpu::TextureView, load: wgpu::LoadOp<wgpu::Color>) -> wgpu::RenderPass<'e> {

@@ -3,7 +3,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>ROTFALL</title>
 <meta name="description" content="A top-down 3D zombie wave shooter with base building and sentries. Free, and nothing to install: it plays in your browser. Written with AI.">
 <meta property="og:type" content="website">
@@ -19,8 +19,8 @@
 <meta name="theme-color" content="#1ea0ff">
 <link rel="icon" type="image/png" href="data:image/png;base64,/*ICON*/">
 <style>
-html, body { margin: 0; height: 100%; background: #05070a; overflow: hidden; }
-canvas { display: block; width: 100vw; height: 100vh; outline: none; }
+html, body { margin: 0; height: 100%; background: #05070a; overflow: hidden; overscroll-behavior: none; touch-action: none; }
+canvas { display: block; width: 100vw; height: 100vh; outline: none; touch-action: none; -webkit-user-select: none; user-select: none; }
 #status {
   position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
   padding: 2em; box-sizing: border-box; text-align: center; white-space: pre-line;

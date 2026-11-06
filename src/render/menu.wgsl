@@ -54,8 +54,10 @@ fn fs_bg(i: V) -> @location(0) vec4<f32> {
     c += vec3<f32>(0.0022, 0.0055, 0.0075) * fog + vec3<f32>(0.12, 0.2, 0.26) * fog * min(lit, 0.2);
 
     // Shade the side the menu sits on, and the corners.
-    let side = smoothstep(0.42, 0.0, i.uv.x) * m.b.w;
+    // Above 1, the whole background steps back behind a gallery picture.
+    let side = smoothstep(0.42, 0.0, i.uv.x) * min(m.b.w, 1.0);
     c *= 1.0 - 0.55 * side;
+    if (m.b.w > 1.5) { c *= 0.07; }
     let d = i.uv - 0.5;
     c *= 1.0 - clamp(dot(d, d) * 0.9, 0.0, 0.8);
     // Dither in display space: dark gradients in 8 bits would otherwise show contours.

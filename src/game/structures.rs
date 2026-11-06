@@ -302,11 +302,11 @@ impl World {
                 self.shake(1.0);
                 for k in 0..6 {
                     let d = self.rng.dir2() * k as f32 * 1.5;
-                    self.explosions.push(super::combat::Explosion { pos: vec3(d.x, 1.0, d.y), radius: 11.0, damage: 2000.0, from_enemy: true, force: 34.0 });
+                    self.explosions.push(super::combat::Explosion { pos: vec3(d.x, 1.0, d.y), radius: 11.0, damage: 2000.0, from_enemy: true, force: 34.0, spares_players: false, barrel: false });
                 }
             }
             SKind::SentryRocket | SKind::SentryMortar => {
-                self.explosions.push(super::combat::Explosion { pos: at, radius: 4.0, damage: 120.0, from_enemy: false, force: 14.0 });
+                self.explosions.push(super::combat::Explosion { pos: at, radius: 4.0, damage: 120.0, from_enemy: false, force: 14.0, spares_players: false, barrel: false });
             }
             _ => {}
         }
@@ -373,7 +373,7 @@ impl World {
                 }
                 if triggered {
                     self.structures[i].hp = 0.0;
-                    self.explosions.push(super::combat::Explosion { pos: pos + Vec3::Y * 0.2, radius: 5.5, damage: 340.0, from_enemy: false, force: 24.0 });
+                    self.explosions.push(super::combat::Explosion { pos: pos + Vec3::Y * 0.2, radius: 5.5, damage: 340.0, from_enemy: false, force: 24.0, spares_players: false, barrel: false });
                 }
                 return;
             }

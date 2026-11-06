@@ -21,6 +21,30 @@ pub struct PlayerInput {
     pub cycle: i32,
 }
 
+/// What killed a player: it picks the death track and scene, and whether the body rises.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DeathCause {
+    #[default]
+    Regular,
+    Zombie,
+    Explosion,
+}
+
+impl DeathCause {
+    pub fn from_u8(v: u8) -> DeathCause {
+        match v {
+            1 => DeathCause::Zombie,
+            2 => DeathCause::Explosion,
+            _ => DeathCause::Regular,
+        }
+    }
+}
+
+/// How long standing back up takes, once a knockdown ends.
+const GETUP_TIME: f32 = 0.5;
+/// Damage multiplier against someone lying helpless on the ground.
+const DOWN_DAMAGE: f32 = 2.0;
+
 pub struct Player {
     pub pos: Vec3,
     pub vel: Vec2,
@@ -62,6 +86,15 @@ pub struct Player {
     pub respawn_seq: u8,
     /// Client side only: where the server last said this player is.
     pub net_target: Vec2,
+    /// Seconds left ragdolled and helpless after being blown off your feet.
+    pub down_t: f32,
+    /// Seconds left of the stand-up animation, and the pose it starts from.
+    pub getup_t: f32,
+    pub getup_from: Pose,
+    pub death_cause: DeathCause,
+    /// Seconds since this player died.
+    pub death_t: f32,
+    pool_t: f32,
 }
 
 pub const RADIUS: f32 = 0.38;
@@ -117,6 +150,12 @@ impl Player {
             out: false,
             respawn_seq: 0,
             net_target: Vec2::ZERO,
+            down_t: 0.0,
+            getup_t: 0.0,
+            getup_from: [Vec3::ZERO; JOINTS],
+            death_cause: DeathCause::Regular,
+            death_t: 0.0,
+            pool_t: 0.0,
         }
     }
 
@@ -186,6 +225,14 @@ impl Player {
         let off = if def.two_handed { grip + f * (def.muzzle * 0.55).min(0.42) - r * 0.02 + Vec3::Y * 0.02 } else { grip - r * 0.08 - f * 0.06 - Vec3::Y * 0.02 };
         p[L_HAND] = off;
         p[L_ELB] = two_bone(p[L_SHO], off, 0.29, 0.27, -r * 0.8 - Vec3::Y);
+        // Climbing up from wherever the ragdoll came to rest.
+        if self.getup_t > 0.0 {
+            let k = (self.getup_t / GETUP_TIME).clamp(0.0, 1.0);
+            let k = k * k * (3.0 - 2.0 * k);
+            for j in 0..JOINTS {
+                p[j] = p[j].lerp(self.getup_from[j], k);
+            }
+        }
         p
     }
 }
@@ -239,6 +286,19 @@ impl World {
         p.cooldown -= dt;
         p.grenade_cd -= dt;
         p.empty_click -= dt;
+        p.getup_t = (p.getup_t - dt).max(0.0);
+
+        // Thrown off your feet: no moving, no shooting, and everything hurts double.
+        if p.alive && p.down_t > 0.0 {
+            p.down_t -= dt;
+            if p.down_t <= 0.0 {
+                self.stand_up(i);
+            }
+            return;
+        }
+        if p.alive && p.getup_t > 0.0 {
+            return;
+        }
 
         if !p.alive {
             if !p.out {
@@ -481,12 +541,13 @@ impl World {
         self.snd(Sfx::ReloadStart, from, 0.6);
     }
 
-    pub fn hurt_player(&mut self, i: usize, amount: f32, from: Vec3) {
+    pub fn hurt_player(&mut self, i: usize, amount: f32, from: Vec3, cause: DeathCause) {
         let invincible = self.invincible;
         let p = &mut self.players[i];
         if !p.alive || p.roll_t > 0.0 || invincible {
             return;
         }
+        let amount = if p.down_t > 0.0 { amount * DOWN_DAMAGE } else { amount };
         p.hp -= amount;
         p.hurt = (p.hurt + amount / 22.0).min(1.0);
         p.regen_delay = 5.0;
@@ -501,27 +562,173 @@ impl World {
         }
         self.snd(Sfx::Hurt, pos, 0.9);
         if dead {
-            self.kill_player(i, away);
+            self.kill_player(i, away, cause);
         }
     }
 
-    /// The body and blood of a fallen player. Runs on servers and clients alike.
-    pub fn player_death_visual(&mut self, i: usize, away: Vec3) {
+    fn owned_body(&self, i: usize) -> Option<usize> {
+        self.ragdolls.bodies.iter().position(|b| b.owner == i as i16)
+    }
+
+    /// Blows a living player off their feet. Their body becomes a ragdoll until they get up.
+    pub fn knock_down(&mut self, i: usize, from: Vec3, force: f32) {
+        let invincible = self.invincible;
+        let p = &mut self.players[i];
+        if !p.alive || invincible {
+            return;
+        }
+        let time = 1.5 + (force / 26.0).min(1.0) * 1.2;
+        if p.down_t > 0.0 {
+            // Already on the ground: the new blast only keeps them there.
+            p.down_t = p.down_t.max(time);
+            return;
+        }
+        p.down_t = time;
+        p.roll_t = 0.0;
+        p.reload = 0.0;
+        p.spin = 0.0;
+        self.fx.muted(true);
+        self.knockdown_visual(i, from, force);
+        self.fx.muted(false);
+        self.fx.record(|| Ev::PlayerDown { player: i as u8, from, force });
+        if i == self.local {
+            self.trauma = (self.trauma + 0.4).min(1.0);
+        }
+        let at = self.players[i].pos;
+        self.snd(Sfx::Hurt, at, 1.0);
+    }
+
+    /// The ragdoll for a knockdown. Runs on servers and clients alike.
+    pub fn knockdown_visual(&mut self, i: usize, from: Vec3, force: f32) {
         let p = &self.players[i];
+        let pose = p.pose();
+        let at = p.pos + Vec3::Y;
+        let vel = vec3(p.vel.x, 1.0, p.vel.y);
+        let body = self.ragdolls.spawn(&pose, vel, 1.0, ALL_JOINTS, super::zombie::STYLE_PLAYER, 60.0);
+        self.ragdolls.bodies[body].owner = i as i16;
+        let dir = ((at - from).normalize_or(Vec3::Z) + Vec3::Y * 0.6).normalize();
+        self.ragdolls.impulse(body, at, dir * force * 0.75, 3.0);
+    }
+
+    fn stand_up(&mut self, i: usize) {
+        self.finish_knockdown(i);
+        let p2 = self.players[i].pos2();
+        let free = self.collide_player(p2);
+        let p = &mut self.players[i];
+        p.pos.x = free.x;
+        p.pos.z = free.y;
+        p.vel = Vec2::ZERO;
+        p.respawn_seq = p.respawn_seq.wrapping_add(1);
+    }
+
+    /// Swaps the ragdoll back for the character, who then climbs to their feet.
+    pub fn finish_knockdown(&mut self, i: usize) {
+        let body = self.owned_body(i);
+        let p = &mut self.players[i];
+        p.down_t = 0.0;
+        if let Some(b) = body {
+            let pose = self.ragdolls.bodies[b].pos;
+            p.getup_from = pose;
+            p.getup_t = GETUP_TIME;
+            p.pos.x = pose[PELVIS].x;
+            p.pos.z = pose[PELVIS].z;
+            self.ragdolls.bodies.swap_remove(b);
+        }
+    }
+
+    /// Keeps a player on their ragdoll, and makes death leave its mark. Runs everywhere.
+    pub fn track_player_bodies(&mut self, dt: f32) {
+        self.fx.muted(true);
+        for i in 0..self.players.len() {
+            let (alive, down) = (self.players[i].alive, self.players[i].down_t > 0.0);
+            if alive && !down {
+                continue;
+            }
+            let body = self.owned_body(i);
+            if let Some(b) = body {
+                let at = self.ragdolls.bodies[b].pos[PELVIS];
+                let p = &mut self.players[i];
+                p.pos.x = at.x;
+                p.pos.z = at.z;
+            }
+            if !alive {
+                let at = self.players[i].pos;
+                let p = &mut self.players[i];
+                p.death_t += dt;
+                p.pool_t -= dt;
+                let (t, due) = (p.death_t, p.pool_t <= 0.0 && p.death_t < 3.0);
+                if due {
+                    p.pool_t = 0.3;
+                    // The pool spreads for a few seconds, from wherever the body came to rest.
+                    self.fx.blood_splat(at, 0.45 + t * 0.4);
+                }
+            }
+        }
+        self.fx.muted(false);
+    }
+
+    /// The body and blood of a fallen player. Runs on servers and clients alike.
+    pub fn player_death_visual(&mut self, i: usize, away: Vec3, cause: DeathCause) {
+        let p = &mut self.players[i];
+        p.death_cause = cause;
+        p.death_t = 0.0;
+        p.pool_t = 0.0;
+        p.down_t = 0.0;
+        p.getup_t = 0.0;
         let pose = p.pose();
         let ground = p.pos;
         let vel = vec3(p.vel.x, 2.0, p.vel.y);
-        let body = self.ragdolls.spawn(&pose, vel, 1.0, ALL_JOINTS, super::zombie::STYLE_PLAYER, 14.0);
+        // Someone already on the ground dies where they lie.
+        let body = match self.owned_body(i) {
+            Some(b) => b,
+            None => {
+                let b = self.ragdolls.spawn(&pose, vel, 1.0, ALL_JOINTS, super::zombie::STYLE_PLAYER, 60.0);
+                self.ragdolls.bodies[b].owner = i as i16;
+                b
+            }
+        };
         self.ragdolls.impulse(body, ground + Vec3::Y, away * 5.0, 2.0);
         self.fx.blood(ground + Vec3::Y, Vec3::Y, 30, 6.0);
         self.fx.blood_splat(ground, 1.2);
+        match cause {
+            DeathCause::Explosion => {
+                // Smitherines, as advertised.
+                self.ragdolls.impulse(body, ground, (away + Vec3::Y).normalize_or(Vec3::Y) * 16.0, 3.0);
+                for limb in [Limb::LArm, Limb::RLeg, Limb::Head, Limb::RArm] {
+                    if self.fx.rng.chance(0.75) {
+                        let fly = (self.fx.rng.dir3() + Vec3::Y).normalize() * self.fx.rng.range(5.0, 12.0);
+                        let b = &mut self.ragdolls.bodies[body];
+                        b.sever(limb);
+                        let joints: &[usize] = match limb {
+                            Limb::LArm => &[L_SHO, L_ELB, L_HAND],
+                            Limb::RArm => &[R_SHO, R_ELB, R_HAND],
+                            Limb::LLeg => &[L_HIP, L_KNEE, L_FOOT],
+                            Limb::RLeg => &[R_HIP, R_KNEE, R_FOOT],
+                            Limb::Head => &[HEAD],
+                        };
+                        for &j in joints {
+                            b.vel[j] += fly;
+                        }
+                    }
+                }
+                self.ragdolls.bodies[body].char_amount = 1.0;
+                self.fx.gibs(ground + Vec3::Y, 18, 12.0, [0.3, 0.32, 0.22]);
+                self.fx.decal(ground.x, ground.z, 2.6, [0.015, 0.012, 0.01, 0.9], 1.0);
+            }
+            DeathCause::Zombie => {
+                // They are still eating.
+                self.fx.blood(ground + Vec3::Y * 0.6, Vec3::Y, 40, 3.5);
+                self.fx.gibs(ground + Vec3::Y * 0.8, 6, 4.0, [0.3, 0.32, 0.22]);
+            }
+            DeathCause::Regular => {}
+        }
     }
 
-    fn kill_player(&mut self, i: usize, away: Vec3) {
+    fn kill_player(&mut self, i: usize, away: Vec3, cause: DeathCause) {
         self.fx.muted(true);
-        self.player_death_visual(i, away);
+        self.player_death_visual(i, away, cause);
         self.fx.muted(false);
-        self.fx.record(|| Ev::PlayerDied { player: i as u8, away });
+        self.fx.record(|| Ev::PlayerDied { player: i as u8, away, cause: cause as u8 });
         let permadeath = self.permadeath;
         let name = self.players[i].name.clone();
         let p = &mut self.players[i];
@@ -540,15 +747,14 @@ impl World {
             } else {
                 self.announce(&format!("{name} IS GONE FOR GOOD"), [1.0, 0.25, 0.2], 4.0, true);
             }
-        } else if self.players.len() > 1 {
-            self.announce(&format!("{name} IS DOWN - REDEPLOYING"), [1.0, 0.25, 0.2], 3.0, true);
-        } else {
-            self.announce("YOU DIED - REDEPLOYING", [1.0, 0.25, 0.2], 3.0, true);
+        } else if i != self.local {
+            self.announce(&format!("{name} IS DOWN - REDEPLOYING"), [1.0, 0.25, 0.2], 3.0, false);
         }
         self.nav_dirty = true;
     }
 
     fn respawn_player(&mut self, i: usize) {
+        self.settle_corpse(i);
         let spot = Player::spawn_point(i);
         let p = &mut self.players[i];
         p.alive = true;
@@ -564,7 +770,29 @@ impl World {
             self.announce("BACK IN THE FIGHT", [0.5, 1.0, 0.6], 2.0, false);
         }
         // Clear space on landing so a respawn is never an instant death.
-        self.explosions.push(super::combat::Explosion { pos: spot, radius: 7.0, damage: 200.0, from_enemy: false, force: 16.0 });
+        self.explosions.push(super::combat::Explosion { pos: spot, radius: 7.0, damage: 200.0, from_enemy: false, force: 16.0, spares_players: true, barrel: false });
+    }
+
+    /// Lets go of the old body as its player redeploys. If zombies did the killing, it joins them.
+    fn settle_corpse(&mut self, i: usize) {
+        let Some(b) = self.owned_body(i) else { return };
+        if self.players[i].death_cause != DeathCause::Zombie {
+            self.ragdolls.bodies[b].owner = -1;
+            return;
+        }
+        let at = self.ragdolls.bodies[b].pos[PELVIS];
+        self.ragdolls.bodies.swap_remove(b);
+        self.fx.record(|| Ev::CorpseRose { player: i as u8 });
+        self.spawn_zombie(super::data::ZKind::Walker, Vec2::new(at.x, at.z));
+        if let Some(z) = self.zombies.last_mut() {
+            z.style = (z.style & 0x00FF_FFFF) | super::zombie::STYLE_TURNED;
+            z.hp *= 1.6;
+            z.max_hp = z.hp;
+        }
+        let name = self.players[i].name.clone();
+        let text = if i == self.local { "YOUR OLD BODY RISES".to_string() } else { format!("{name}'S BODY RISES") };
+        self.announce(&text, [0.6, 1.0, 0.4], 3.0, false);
+        self.snd(Sfx::Groan3, vec3(at.x, 0.0, at.z), 1.0);
     }
 
     pub fn buy_weapon(&mut self, p: usize, i: usize) -> Result<(), &'static str> {

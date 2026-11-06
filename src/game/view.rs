@@ -12,6 +12,8 @@ use glam::{vec3, Mat4, Quat, Vec3};
 pub struct Camera {
     pub focus: Vec3,
     pub zoom: f32,
+    /// Extra zoom applied by events, eased toward 1. Below 1 pulls in close.
+    pub punch: f32,
     pub eye: Vec3,
     pub view_proj: Mat4,
     pub inv: Mat4,
@@ -21,7 +23,7 @@ const CAM_OFFSET: Vec3 = Vec3::new(0.0, 22.5, 16.5);
 
 impl Camera {
     pub fn new() -> Self {
-        Camera { focus: Vec3::ZERO, zoom: 1.0, eye: CAM_OFFSET, view_proj: Mat4::IDENTITY, inv: Mat4::IDENTITY }
+        Camera { focus: Vec3::ZERO, zoom: 1.0, punch: 1.0, eye: CAM_OFFSET, view_proj: Mat4::IDENTITY, inv: Mat4::IDENTITY }
     }
 
     pub fn update(&mut self, target: Vec3, dt: f32, aspect: f32, shake: f32, time: f32) {
@@ -33,7 +35,7 @@ impl Camera {
             ((time * 47.0).cos() + (time * 91.0).sin() * 0.5) * s * 1.1,
         );
         let focus = self.focus + off;
-        self.eye = focus + CAM_OFFSET * self.zoom;
+        self.eye = focus + CAM_OFFSET * self.zoom * self.punch;
         let view = look_at_rh(self.eye, focus, Vec3::Y);
         let proj = perspective_rh(38f32.to_radians(), aspect, 1.0, 180.0);
         self.view_proj = proj * view;
@@ -128,6 +130,14 @@ fn look_for(style: u32) -> BodyLook {
             l.pants = [0.32, 0.3, 0.3];
             l.girth = 0.85;
             l.eye_glow = 11.0;
+        }
+        8 => {
+            // A dead player, back on their feet: their own kit over rotting skin.
+            l.skin = [0.36, 0.44, 0.26];
+            l.shirt = [0.17, 0.22, 0.14];
+            l.pants = [0.11, 0.13, 0.1];
+            l.head_mesh = m::HEAD_P;
+            l.eye_glow = 6.0;
         }
         7 => {
             // Titan.
@@ -342,11 +352,17 @@ pub fn draw_world(w: &mut World, cam: &Camera, frame: &mut FrameData, ghost: Opt
     frame.exposure = 1.0;
     frame.bloom = 0.11;
     frame.vignette = 2.1 - n * 0.4;
+    // Death closes in: the world dims and the edges darken over the first couple of seconds.
+    if !w.me().alive {
+        let k = (w.me().death_t * 0.6).min(1.0);
+        frame.exposure = 1.0 - 0.3 * k;
+        frame.vignette += 2.4 * k;
+    }
     let p = w.me();
     let hp_k: f32 = (p.hp / p.max_hp).clamp(0.0, 1.0);
     frame.damage = (p.hurt * 0.55 + (1.0 - hp_k).powi(2) * 0.3 + if p.alive { 0.0 } else { 0.25 }).min(0.75);
     frame.chroma = 0.004 + w.trauma * 0.016 + p.hurt * 0.012;
-    frame.desaturate = if w.game_over { (w.game_over_timer * 0.3).min(0.85) } else if !p.alive { 0.55 } else { (1.0 - hp_k) * 0.3 };
+    frame.desaturate = if w.game_over { (w.game_over_timer * 0.3).min(0.85) } else if !p.alive { (0.3 + p.death_t * 0.35).min(0.8) } else { (1.0 - hp_k) * 0.3 };
 
     // Static props.
     for pr in &w.map.props {
@@ -457,7 +473,8 @@ pub fn draw_world(w: &mut World, cam: &Camera, frame: &mut FrameData, ghost: Opt
 
     // Players. The flashlight's shadow map exists once, so only the local one casts.
     for (pi, p) in w.players.iter().enumerate() {
-        if !p.alive || !p.connected {
+        // While down, the ragdoll in the corpse list is the character.
+        if !p.alive || !p.connected || p.down_t > 0.0 {
             continue;
         }
         let pose = p.pose();

@@ -15,6 +15,45 @@ pub enum Track {
     CombatC,
     Boss,
     GameOver,
+    Rot,
+    OneOfMany,
+    Smitherines,
+    RestWell,
+}
+
+impl Track {
+    /// In album order.
+    pub const ALL: [Track; 11] = [
+        Track::Menu, Track::Build, Track::CombatA, Track::CombatB, Track::CombatC, Track::Boss,
+        Track::GameOver, Track::Rot, Track::OneOfMany, Track::Smitherines, Track::RestWell,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Track::Menu => "Descent",
+            Track::Build => "Daytime Escape",
+            Track::CombatA => "Holdout",
+            Track::CombatB => "No Sleep",
+            Track::CombatC => "Rust Choir",
+            Track::Boss => "Colossus",
+            Track::GameOver => "Overrun",
+            Track::Rot => "Rot",
+            Track::OneOfMany => "One of Many",
+            Track::Smitherines => "Smitherines",
+            Track::RestWell => "Rest Well, for It Is Over",
+        }
+    }
+
+    /// How long one full pass through the track takes.
+    pub fn loop_seconds(self) -> f32 {
+        let s = song(self);
+        let steps: u32 = s.sections.iter().map(|sec| {
+            let p = parse_section(sec);
+            let bars = p.chords.len().max(1) as u32;
+            (bars * 16).max(p.lead_len.div_ceil(16) * 16) * sec.repeats
+        }).sum();
+        steps as f32 * 60.0 / s.bpm / 4.0
+    }
 }
 
 pub struct Section {
@@ -184,6 +223,44 @@ static GAMEOVER: &[Section] = &[Section {
     lead: "A4:16 F5:12 D5:4 G5:8 F5:8 E5:12 C#5:4", repeats: 2,
 }];
 
+// Death tracks. Each has about eight seconds to land before the player is back in the fight.
+static ROT: &[Section] = &[Section {
+    chords: "Dm Gm Bb A",
+    kick: "x..x............", snare: O, hat: O, bass: "0...............",
+    arp: O, stab: O, choir: "x",
+    lead: "A4:8 F5:8 D5:8 A4:8 G4:8 A#4:8 D5:16 F4:8 A#4:8 D5:8 F5:8 E5:8 C#5:8 A4:16",
+    repeats: 2,
+}];
+
+static ONE_OF_MANY: &[Section] = &[Section {
+    chords: "Cm Db Cm G",
+    kick: "x.......x.x.....", snare: "............x...", hat: O, bass: "0..0....0..0....",
+    arp: O, stab: "x...............", choir: "x",
+    lead: "G4:8 C5:8 C#5:16 C5:8 G4:8 D#5:16 D5:8 B4:8 G4:16 G4:8 D#5:8 F5:16 D#5:8 C5:8 G4:8 C5:8 F4:8 D5:8 B4:8 G4:8",
+    repeats: 2,
+}];
+
+static SMITHERINES: &[Section] = &[Section {
+    chords: "Em Em C B",
+    kick: "x.x.x.xxx.x.x.xx", snare: "....x.......x.xx", hat: "xxxxxxxxxxxxxxxx",
+    bass: "0.00.00.0.00.01.", arp: "0120120120120120", stab: "x..x..x.x..x..x.", choir: O,
+    lead: "B5:4 E6:4 G6:8 F#6:4 E6:4 B5:8 G5:4 B5:4 E6:8 B5:8 G5:8 C6:4 E6:4 G6:8 E6:8 D#6:4 B5:4 F#5:8 B5:16 -:8",
+    repeats: 2,
+}];
+
+static REST_WELL: &[Section] = &[
+    Section {
+        chords: "F C Dm Bb", kick: O, snare: O, hat: O, bass: "0...............",
+        arp: O, stab: O, choir: O,
+        lead: "A4:8 C5:8 G4:8 C5:8 F4:8 A4:8 F4:8 D5:8", repeats: 1,
+    },
+    Section {
+        chords: "F C Bb F", kick: O, snare: O, hat: O, bass: "0.......5.......",
+        arp: "0...1...2...1...", stab: O, choir: "x",
+        lead: "C5:8 F5:8 E5:8 C5:8 D5:8 A#4:8 A4:16", repeats: 1,
+    },
+];
+
 pub fn song(t: Track) -> Song {
     let mk = |bpm, swing, pad_cut, bass_drive, lead_inst, sections| Song {
         bpm, swing, pad_cut, bass_drive, lead_inst, sections,
@@ -196,6 +273,10 @@ pub fn song(t: Track) -> Song {
         Track::CombatC => mk(116.0, 0.06, 1700.0, 3.5, Inst::Lead, COMBAT_C),
         Track::Boss => mk(158.0, 0.0, 3200.0, 4.5, Inst::Lead, BOSS),
         Track::GameOver => mk(58.0, 0.0, 700.0, 1.0, Inst::Bell, GAMEOVER),
+        Track::Rot => mk(60.0, 0.0, 700.0, 2.0, Inst::Bell, ROT),
+        Track::OneOfMany => mk(72.0, 0.0, 800.0, 3.0, Inst::Bell, ONE_OF_MANY),
+        Track::Smitherines => mk(146.0, 0.0, 2600.0, 5.0, Inst::Lead, SMITHERINES),
+        Track::RestWell => mk(50.0, 0.0, 1100.0, 1.0, Inst::Bell, REST_WELL),
     }
 }
 
@@ -710,7 +791,10 @@ pub fn layer_gains(track: Track, intensity: f32) -> [f32; BUSES] {
     };
     let i = intensity;
     match track {
-        Track::Menu | Track::GameOver => [0.9, 0.5, 0.5, 0.7, 0.0, 0.0, 0.0],
+        Track::Menu | Track::GameOver | Track::RestWell => [0.9, 0.5, 0.5, 0.7, 0.0, 0.0, 0.0],
+        Track::Rot => [0.9, 0.7, 0.4, 0.8, 0.8, 0.0, 0.0],
+        Track::OneOfMany => [1.0, 0.8, 0.4, 0.75, 0.85, 0.6, 0.7],
+        Track::Smitherines => [0.6, 0.85, 0.5, 0.75, 0.95, 0.7, 0.8],
         Track::Build => [0.8, 0.55, 0.65, 0.65, 0.55, 0.45, 0.0],
         _ => [
             0.7,

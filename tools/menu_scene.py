@@ -204,14 +204,9 @@ if MODE == "icon":
     h = ob.dimensions.y
     k = 1.0 / h
     ob.scale = (k, k, k)
-    # Dark steel tile with softened corners, and a glowing disc behind the letter.
+    # A glowing disc behind the letter, on a fully transparent background.
     bm = bmesh.new()
-    box(bm, (0, 0.22, 0), (1.5, 0.12, 1.5))
-    tile = from_bm("tile", bm, material("tile", (0.012, 0.02, 0.028), 0.45, 0.7))
-    tile.modifiers.new("b", "BEVEL").width = 0.26
-    tile.modifiers["b"].segments = 8
-    bm = bmesh.new()
-    cyl(bm, (0, 0.15, 0), (0, 0.14, 0), 0.62, 0.62, 48)
+    cyl(bm, (0, 0.15, 0), (0, 0.14, 0), 0.74, 0.74, 64)
     from_bm("glow", bm, material("glow", (0, 0, 0), 0.5, emit=(0.02, 0.42, 1.0), strength=0.62))
     cam = bpy.data.cameras.new("c")
     cam.type = "ORTHO"

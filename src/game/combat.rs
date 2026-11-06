@@ -1,7 +1,7 @@
 //! Damage, gunfire, projectiles, explosions and dying.
 use super::data::*;
 use super::fx::Ev;
-use super::player::rotate_y;
+use super::player::{rotate_y, DeathCause};
 use super::World;
 use crate::audio::Sfx;
 use crate::ragdoll::*;
@@ -15,6 +15,10 @@ pub struct Explosion {
     pub damage: f32,
     pub from_enemy: bool,
     pub force: f32,
+    /// Leaves players alone: the blast that clears space when someone redeploys.
+    pub spares_players: bool,
+    /// Barrels throw anyone anywhere in the blast, not just those close to its center.
+    pub barrel: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -466,7 +470,7 @@ impl World {
                     z.spawn_t <= 0.5 && Vec2::new(z.pos.x - next.x, z.pos.z - next.z).length_squared() < (z.radius + 0.3).powi(2)
                 });
                 if wall.is_some() || hit_z || p.ttl <= 0.0 || self.barrel_contact(next, 0.5) {
-                    self.explosions.push(Explosion { pos: next, radius: p.radius, damage: p.damage, from_enemy: false, force: 22.0 });
+                    self.explosions.push(Explosion { pos: next, radius: p.radius, damage: p.damage, from_enemy: false, force: 22.0, spares_players: false, barrel: false });
                     return false;
                 }
                 p.pos = next;
@@ -502,7 +506,7 @@ impl World {
                     z.spawn_t <= 0.5 && z.pos.distance_squared(p.pos) < (z.radius + 0.25).powi(2) + 1.3
                 });
                 if p.ttl <= 0.0 || (contact && p.ttl < 1.7) {
-                    self.explosions.push(Explosion { pos: p.pos, radius: p.radius, damage: p.damage, from_enemy: false, force: 20.0 });
+                    self.explosions.push(Explosion { pos: p.pos, radius: p.radius, damage: p.damage, from_enemy: false, force: 20.0, spares_players: false, barrel: false });
                     return false;
                 }
                 true
@@ -516,7 +520,7 @@ impl World {
                 }
                 if p.pos.y <= 0.15 || p.ttl <= 0.0 {
                     p.pos.y = 0.15;
-                    self.explosions.push(Explosion { pos: p.pos, radius: p.radius, damage: p.damage, from_enemy: false, force: 20.0 });
+                    self.explosions.push(Explosion { pos: p.pos, radius: p.radius, damage: p.damage, from_enemy: false, force: 20.0, spares_players: false, barrel: false });
                     return false;
                 }
                 true
@@ -642,7 +646,7 @@ impl World {
                             let pl = &self.players[pi];
                             if pl.alive && pl.connected && pl.pos.distance_squared(h.pos) < h.radius * h.radius {
                                 let at = h.pos;
-                                self.hurt_player(pi, dmg, at);
+                                self.hurt_player(pi, dmg, at, DeathCause::Regular);
                             }
                         }
                         let t = super::tile_of(Vec2::new(h.pos.x, h.pos.z));
@@ -680,7 +684,7 @@ impl World {
             if self.barrels[i].hp <= 0.0 {
                 let b = self.barrels.swap_remove(i);
                 let at = b.pos + Vec3::Y * 0.5;
-                self.explosions.push(Explosion { pos: at, radius: 7.0, damage: 520.0, from_enemy: false, force: 26.0 });
+                self.explosions.push(Explosion { pos: at, radius: 7.0, damage: 520.0, from_enemy: false, force: 26.0, spares_players: false, barrel: true });
                 self.hazards.push(Hazard { kind: HazKind::Fire, pos: b.pos, radius: 2.4, ttl: 8.0, tick: 0.0, dps: 26.0 });
                 for _ in 0..7 {
                     let v = self.rng.dir3() * 7.0 + Vec3::Y * 6.0;
@@ -741,13 +745,22 @@ impl World {
             }
         }
         // Enemy-caused blasts hurt your things. Your own only reach you lightly.
-        for pi in 0..self.players.len() {
-            let pl = &self.players[pi];
-            let pdist = pl.pos.distance(e.pos);
-            if pl.alive && pl.connected && pdist < e.radius * 0.8 {
-                let k = 1.0 - pdist / (e.radius * 0.8);
-                let dmg = if e.from_enemy { e.damage * k * 0.55 } else { e.damage * k * 0.035 };
-                self.hurt_player(pi, dmg, e.pos);
+        if !e.spares_players {
+            for pi in 0..self.players.len() {
+                let pl = &self.players[pi];
+                let pdist = pl.pos.distance(e.pos);
+                if pl.alive && pl.connected && pdist < e.radius * 0.8 {
+                    let k = 1.0 - pdist / (e.radius * 0.8);
+                    let dmg = if e.from_enemy { e.damage * k * 0.55 } else { e.damage * k * 0.035 };
+                    self.hurt_player(pi, dmg, e.pos, DeathCause::Explosion);
+                    // Anyone close enough who lives is thrown off their feet, helpless until they get up.
+                    if self.players[pi].alive && (k > 0.2 || e.barrel) {
+                        self.knock_down(pi, e.pos, e.force * (0.4 + k * 0.6));
+                    }
+                } else if e.barrel && pl.alive && pl.connected && pdist < e.radius {
+                    // Past the reach of the damage, but the shockwave still takes your feet.
+                    self.knock_down(pi, e.pos, e.force * 0.4);
+                }
             }
         }
         if e.from_enemy {
@@ -792,7 +805,7 @@ impl World {
         }
 
         if z.kind == ZKind::Bloater {
-            self.explosions.push(Explosion { pos: z.pos + Vec3::Y * 0.8, radius: 4.8, damage: 150.0, from_enemy: true, force: 16.0 });
+            self.explosions.push(Explosion { pos: z.pos + Vec3::Y * 0.8, radius: 4.8, damage: 150.0, from_enemy: true, force: 16.0, spares_players: false, barrel: false });
             self.hazards.push(Hazard { kind: HazKind::Acid, pos: z.pos, radius: 2.5, ttl: 6.0, tick: 0.0, dps: 10.0 });
         }
         // Clients derive the ragdoll and gore from this one event.
@@ -806,7 +819,7 @@ impl World {
             self.shake(0.9);
             for k in 0..3 {
                 let off = self.rng.dir2() * k as f32;
-                self.explosions.push(Explosion { pos: z.pos + vec3(off.x, 1.0, off.y), radius: 6.0, damage: 300.0, from_enemy: false, force: 20.0 });
+                self.explosions.push(Explosion { pos: z.pos + vec3(off.x, 1.0, off.y), radius: 6.0, damage: 300.0, from_enemy: false, force: 20.0, spares_players: false, barrel: false });
             }
             self.announce("TITAN DOWN", [1.0, 0.85, 0.2], 3.0, true);
             self.snd(Sfx::Boss, z.pos, 1.0);

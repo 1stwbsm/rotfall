@@ -7,6 +7,8 @@ use crate::ragdoll::*;
 use glam::{vec3, Vec2, Vec3};
 
 pub const STYLE_PLAYER: u32 = 0xFFFF_FFFF;
+/// A dead player who got back up: the top byte stands apart from every zombie kind.
+pub const STYLE_TURNED: u32 = 8 << 24;
 
 pub struct Zombie {
     pub id: u32,
@@ -506,7 +508,7 @@ impl World {
                     .min_by(|&a, &b| self.players[a].pos.distance_squared(pos).total_cmp(&self.players[b].pos.distance_squared(pos)));
                 if let Some(v) = victim {
                     if self.players[v].pos.distance(pos) < reach + 0.1 {
-                        self.hurt_player(v, dmg, pos);
+                        self.hurt_player(v, dmg, pos, super::player::DeathCause::Zombie);
                         if kind == ZKind::Brute {
                             let d = (self.players[v].pos2() - Vec2::new(pos.x, pos.z)).normalize_or_zero();
                             self.players[v].vel += d * 12.0;
@@ -603,7 +605,7 @@ impl World {
         for p in 0..self.players.len() {
             if self.players[p].alive && self.players[p].connected && self.players[p].pos.distance(pos) < 6.5 {
                 let dmg = 28.0 + self.wave as f32;
-                self.hurt_player(p, dmg, pos);
+                self.hurt_player(p, dmg, pos, super::player::DeathCause::Zombie);
             }
         }
         let list: Vec<usize> = self.structures.iter().enumerate().filter(|(_, s)| s.pos.distance(pos) < 6.5).map(|(i, _)| i).collect();

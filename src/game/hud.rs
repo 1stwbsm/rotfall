@@ -5,6 +5,7 @@ use super::map::HALF;
 use super::net::{self, Command, RosterEntry};
 use super::save::Slot;
 use super::{tile_center, Phase, World};
+use crate::audio::Track;
 use crate::audio::Sfx;
 use crate::render::font;
 use crate::render::{FrameData, UiVertex};
@@ -134,10 +135,22 @@ fn hp_color(k: f32) -> C {
     }
 }
 
-pub fn draw(app: &mut App, frame: &mut FrameData, raw: &RawInput, size: (u32, u32)) {
+/// The UI's scale. Fingers need bigger targets than a mouse, on what is usually a tinier screen.
+pub fn ui_scale(app: &App, size: (u32, u32)) -> f32 {
     let (w, h) = (size.0 as f32, size.1 as f32);
     let s = ((h / 1080.0).min(w / 1600.0) * 2.0).round().max(1.0) * 0.5 + 0.5;
-    let click = raw.lmb_pressed;
+    if app.touch.enabled {
+        s.max(((h / 500.0).min(w / 1000.0) * 2.0).round() * 0.5).min(3.0)
+    } else {
+        s
+    }
+}
+
+pub fn draw(app: &mut App, frame: &mut FrameData, raw: &RawInput, size: (u32, u32)) {
+    let (w, h) = (size.0 as f32, size.1 as f32);
+    let s = ui_scale(app, size);
+    // While the touch notice is up, nothing behind it can be pressed.
+    let click = raw.lmb_pressed && !app.touch.prompt;
     let typed = raw.typed.clone();
     let backspace = raw.hit(winit::keyboard::KeyCode::Backspace);
     let time = app.menu_t;
@@ -155,7 +168,13 @@ pub fn draw(app: &mut App, frame: &mut FrameData, raw: &RawInput, size: (u32, u3
             } else if app.panel_open {
                 server_panel(app, &mut ui);
             }
-            cursor(app, &mut ui);
+            if app.touch_play() {
+                touch_controls(app, &mut ui, size);
+            }
+            // Nothing to aim while dead.
+            if !app.touch.enabled && app.world.me().alive {
+                cursor(app, &mut ui);
+            }
         }
         Screen::Paused => {
             ingame(app, &mut ui);
@@ -165,6 +184,11 @@ pub fn draw(app: &mut App, frame: &mut FrameData, raw: &RawInput, size: (u32, u3
             ingame(app, &mut ui);
             game_over(app, &mut ui);
         }
+    }
+    music_toast(app, &mut ui);
+    if app.touch.prompt {
+        ui.click = raw.lmb_pressed;
+        touch_prompt(app, &mut ui);
     }
     if app.show_fps {
         let t = format!("{:>4.0} FPS {:>5.1} MS  Z:{} R:{} P:{}", app.fps, app.frame_ms, app.world.zombies.len(), app.world.ragdolls.bodies.len(), app.world.fx.p.len());
@@ -287,7 +311,15 @@ fn ingame(app: &mut App, ui: &mut Ui) {
             };
             ui.text_center(cx, m + 7.0 * s, 2.0 * s, &t, GREEN);
             let c = if world.hold_timer {
-                if app.is_client() { "WAITING FOR THE HOST TO START".to_string() } else { "[ENTER] START THE MATCH".to_string() }
+                if app.is_client() {
+                    "WAITING FOR THE HOST TO START".to_string()
+                } else if app.touch.enabled {
+                    "TAP WAVE TO START THE MATCH".to_string()
+                } else {
+                    "[ENTER] START THE MATCH".to_string()
+                }
+            } else if app.touch.enabled {
+                format!("NEXT WAVE {:.0}S   TAP WAVE TO START NOW", timer.ceil())
             } else {
                 format!("NEXT WAVE {:.0}S   [ENTER] START NOW", timer.ceil())
             };
@@ -335,7 +367,7 @@ fn ingame(app: &mut App, ui: &mut Ui) {
     // Below the reactor and Titan bars so that nothing overlaps.
     let mut y = m + 124.0 * s;
     // Menus drawn over the battle have their own headings in that spot.
-    let show_messages = app.screen == Screen::Playing;
+    let show_messages = app.screen == Screen::Playing && p.alive;
     for msg in world.messages.iter().filter(|m| m.big && show_messages) {
         let a = (msg.ttl * 2.0).min(1.0);
         ui.text_center(cx, y, 4.0 * s, &msg.text, [msg.color[0], msg.color[1], msg.color[2], a]);
@@ -346,17 +378,18 @@ fn ingame(app: &mut App, ui: &mut Ui) {
         ui.text_center(cx, y, 2.0 * s, &msg.text, [msg.color[0], msg.color[1], msg.color[2], a]);
         y += 22.0 * s;
     }
-    if p.out && !world.game_over {
-        ui.text_center(cx, h * 0.8, 2.0 * s, "YOU ARE OUT - SPECTATING YOUR TEAM", [1.0, 0.45, 0.35, 1.0]);
-    } else if !p.alive && !world.game_over {
-        ui.text_center(cx, h * 0.45, 3.0 * s, &format!("REDEPLOY IN {:.0}", p.respawn.ceil()), WHITE);
+    if !p.alive && app.screen == Screen::Playing {
+        death_scene(world, ui);
+    } else if p.down_t > 0.0 {
+        ui.text_center(cx, h * 0.68, 3.0 * s, "KNOCKED DOWN", [1.0, 0.6, 0.2, 1.0]);
+        ui.text_center(cx, h * 0.68 + 30.0 * s, 1.0 * s, "YOU ARE HELPLESS UNTIL YOU GET UP", WHITE);
     }
     if world.permadeath {
         ui.text_shadow(m + 8.0 * s, m + 54.0 * s, 1.0 * s, "PERMADEATH", RED);
     }
 
     // ---- key hints
-    if app.screen == Screen::Playing && !app.armory_open && app.build_sel.is_none() {
+    if app.screen == Screen::Playing && !app.armory_open && app.build_sel.is_none() && !app.touch.enabled && p.alive {
         let hint = if app.is_multiplayer() { "[B] BUILD   [TAB] ARMORY   [P] PLAYERS   [H] HELP" } else { "[B] BUILD   [TAB] ARMORY   [F5] SAVE   [H] HELP" };
         ui.text_center(cx, h - m - 12.0 * s, 1.0 * s, hint, [0.8, 0.8, 0.76, 0.8]);
         // Contextual: what is under the cursor?
@@ -482,7 +515,12 @@ fn build_bar(app: &mut App, ui: &mut Ui) {
     let d = sdef(BUILDABLE[sel]);
     ui.text_center(w * 0.5, y0 - 36.0 * s, 2.0 * s, d.name, ACCENT);
     ui.text_center(w * 0.5, y0 - 18.0 * s, 1.0 * s, d.blurb, WHITE);
-    ui.text_center(w * 0.5, y0 + 92.0 * s, 1.0 * s, "[LMB] PLACE   [RMB/B] EXIT   [WHEEL] SELECT   [X] SELL   [U] UPGRADE   [T] REPAIR", [0.85, 0.85, 0.8, 0.9]);
+    let help = if app.touch.enabled {
+        "TAP THE GROUND TO PLACE. TAP WHAT YOU BUILT, THEN SELL, UPGRADE OR REPAIR"
+    } else {
+        "[LMB] PLACE   [RMB/B] EXIT   [WHEEL] SELECT   [X] SELL   [U] UPGRADE   [T] REPAIR"
+    };
+    ui.text_center(w * 0.5, y0 + 92.0 * s, 1.0 * s, help, [0.85, 0.85, 0.8, 0.9]);
     hover_info(app, ui);
 }
 
@@ -758,14 +796,18 @@ fn title(app: &mut App, ui: &mut Ui) {
     let top = logo[1] + logo[3] + 12.0 * s;
     let cw = (340.0 * s).min(w * 0.42);
     // A soft shadow behind the column keeps text readable over the bright parts of the art.
-    let edge = x + cw + 30.0 * s;
-    ui.rect(0.0, 0.0, edge, h, [0.0, 0.0, 0.0, 0.42]);
+    let edge = x + if app.page == Page::Soundtrack { 660.0 * s } else { cw + 30.0 * s };
+    if app.page != Page::Gallery {
+        ui.rect(0.0, 0.0, edge, h, [0.0, 0.0, 0.0, 0.42]);
+    }
     // Whole-pixel strips that meet exactly: any overlap would darken twice and show as a line.
     let edge = edge.round();
     let fade = (110.0 * s).round() as i32;
-    for px in 0..fade {
-        let f = px as f32 / fade as f32;
-        ui.rect(edge + px as f32, 0.0, 1.0, h, [0.0, 0.0, 0.0, 0.42 * (1.0 - f) * (1.0 - f)]);
+    if app.page != Page::Gallery {
+        for px in 0..fade {
+            let f = px as f32 / fade as f32;
+            ui.rect(edge + px as f32, 0.0, 1.0, h, [0.0, 0.0, 0.0, 0.42 * (1.0 - f) * (1.0 - f)]);
+        }
     }
     match app.page {
         Page::Main => page_main(app, ui, x, top, cw),
@@ -785,6 +827,9 @@ fn title(app: &mut App, ui: &mut Ui) {
         Page::Records => page_records(app, ui, x, top, cw),
         Page::Options => page_options(app, ui, x, top, cw),
         Page::Manual => page_manual(app, ui, x, top),
+        Page::Extras => page_extras(app, ui, x, top, cw),
+        Page::Gallery => page_gallery(app, ui),
+        Page::Soundtrack => page_soundtrack(app, ui, x, top, cw),
     }
     if let Some(e) = &app.menu_error {
         ui.text_shadow(x, h - 46.0 * s, 2.0 * s, e, RED);
@@ -819,9 +864,10 @@ fn page_main(app: &mut App, ui: &mut Ui, x: f32, mut y: f32, cw: f32) {
     }
     // Browsers have no sockets a game server could use, so the web build is single player.
     let multiplayer = cfg!(not(target_arch = "wasm32"));
-    let rows: [(&str, &str, Page); 5] = [
+    let rows: [(&str, &str, Page); 6] = [
         ("NEW GAME", "STANDARD OR PERMADEATH", Page::NewGame),
         ("MULTIPLAYER", "CO-OP: HOST OR JOIN", Page::Multiplayer),
+        ("EXTRAS", "PICTURES AND THE SOUNDTRACK", Page::Extras),
         ("RECORDS", "YOUR BEST RUNS", Page::Records),
         ("OPTIONS", "", Page::Options),
         ("FIELD MANUAL", "", Page::Manual),
@@ -1039,6 +1085,11 @@ fn page_options(app: &mut App, ui: &mut Ui, x: f32, mut y: f32, cw: f32) {
         app.want_fullscreen = Some(full);
     }
     y += 26.0 * s;
+    let mut touch = app.touch.enabled;
+    if toggle(ui, x, y, cw, "TOUCH CONTROLS", &mut touch) {
+        app.answer_touch_prompt(touch);
+    }
+    y += 26.0 * s;
     field(ui, &mut app.focus, 2, x, y, cw, "YOUR NAME", &mut app.settings.name, false, 16);
     y += 50.0 * s;
     let saves = if cfg!(target_arch = "wasm32") { "THIS BROWSER'S STORAGE".to_string() } else { app.data_dir.display().to_string() };
@@ -1079,6 +1130,229 @@ fn page_manual(app: &mut App, ui: &mut Ui, x: f32, mut y: f32) {
     ui.text_shadow(x, y, 1.0 * s, "IF THE REACTOR FALLS, IT IS OVER. BARRELS CHAIN. FIRE SPREADS. THE FROZEN SHATTER.", GREEN);
     y += 16.0 * s;
     back_item(app, ui, x, y, 300.0 * s, Page::Main);
+}
+
+/// A picture's place on screen, as large as fits while leaving room for its controls.
+pub fn gallery_rect(i: usize, size: (u32, u32)) -> [f32; 4] {
+    let (w, h) = (size.0 as f32, size.1 as f32);
+    let (iw, ih, _) = crate::render::GALLERY[i.min(crate::render::GALLERY.len() - 1)];
+    let (room_w, room_h) = (w * 0.86, h * 0.72);
+    let k = (room_w / iw).min(room_h / ih);
+    let (dw, dh) = (iw * k, ih * k);
+    [(w - dw) * 0.5, h * 0.05 + (room_h - dh) * 0.5, dw, dh]
+}
+
+fn page_extras(app: &mut App, ui: &mut Ui, x: f32, mut y: f32, cw: f32) {
+    let s = ui.s;
+    ui.text_shadow(x, y, 2.0 * s, "EXTRAS", ACCENT);
+    y += 26.0 * s;
+    if menu_item(ui, x, y, cw, 42.0 * s, "SOUNDTRACK", "LISTEN, AND DOWNLOAD EVERY TRACK", true) {
+        app.page = Page::Soundtrack;
+    }
+    y += 48.0 * s;
+    if menu_item(ui, x, y, cw, 42.0 * s, "GALLERY", "ART AND SCREENSHOTS", true) {
+        app.page = Page::Gallery;
+    }
+    y += 56.0 * s;
+    back_item(app, ui, x, y, cw, Page::Main);
+}
+
+fn page_gallery(app: &mut App, ui: &mut Ui) {
+    let (w, h, s) = (ui.w, ui.h, ui.s);
+    let n = crate::render::GALLERY.len();
+    let cap = crate::render::GALLERY[app.gallery_i.min(n - 1)].2;
+    ui.text_center(w * 0.5, h * 0.79, 1.0 * s, cap, WHITE);
+    ui.text_center(w * 0.5, h * 0.79 + 13.0 * s, 1.0 * s, &format!("{} / {n}", app.gallery_i + 1), DIM);
+    let (bw, bh) = (110.0 * s, 30.0 * s);
+    let y = h - bh - 12.0 * s;
+    let cx = w * 0.5;
+    if ui.button(cx - bw * 1.5 - 8.0 * s, y, bw, bh, "PREVIOUS", 1.0 * s, true) {
+        app.gallery_i = (app.gallery_i + n - 1) % n;
+    }
+    if ui.button(cx - bw * 0.5, y, bw, bh, "BACK", 1.0 * s, true) {
+        app.page = Page::Extras;
+    }
+    if ui.button(cx + bw * 0.5 + 8.0 * s, y, bw, bh, "NEXT", 1.0 * s, true) {
+        app.gallery_i = (app.gallery_i + 1) % n;
+    }
+}
+
+fn page_soundtrack(app: &mut App, ui: &mut Ui, x: f32, mut y: f32, cw: f32) {
+    let s = ui.s;
+    ui.text_shadow(x, y, 2.0 * s, "SOUNDTRACK", ACCENT);
+    y += 24.0 * s;
+    let (pw, rh) = (620.0 * s, 25.0 * s);
+    let pw = pw.min(ui.w - x - 10.0);
+    for (i, &t) in Track::ALL.iter().enumerate() {
+        let on = app.preview == Some(t);
+        ui.rect(x, y, pw, rh - 2.0 * s, if on { PANEL_HI } else { PANEL });
+        ui.text_shadow(x + 8.0 * s, y + 7.0 * s, 1.0 * s, &format!("{:2}", i + 1), DIM);
+        ui.text_shadow(x + 34.0 * s, y + 7.0 * s, 1.0 * s, t.name(), if on { ACCENT } else { WHITE });
+        ui.text_shadow(x + pw - 210.0 * s, y + 7.0 * s, 1.0 * s, &clock(t.loop_seconds()), DIM);
+        if ui.button(x + pw - 164.0 * s, y + 1.0 * s, 72.0 * s, rh - 4.0 * s, if on { "STOP" } else { "PLAY" }, 1.0 * s, true) {
+            app.preview = if on { None } else { Some(t) };
+        }
+        let saving = app.ost.as_ref().is_some_and(|r| r.track == t);
+        let waiting = app.ost_queue.contains(&t);
+        if ui.button(x + pw - 86.0 * s, y + 1.0 * s, 80.0 * s, rh - 4.0 * s, if saving { "WORKING" } else if waiting { "QUEUED" } else { "WAV" }, 1.0 * s, !saving && !waiting) {
+            app.queue_soundtrack(&[t]);
+        }
+        y += rh;
+    }
+    y += 6.0 * s;
+    if ui.button(x, y, 220.0 * s, 28.0 * s, "DOWNLOAD ALL AS WAV", 1.0 * s, true) {
+        app.queue_soundtrack(&Track::ALL);
+    }
+    if let Some(r) = &app.ost {
+        ui.bar(x + 230.0 * s, y + 8.0 * s, (pw - 230.0 * s).max(40.0), 12.0 * s, r.progress(), ACCENT);
+    }
+    y += 34.0 * s;
+    if !app.ost_status.is_empty() {
+        let text: String = app.ost_status.chars().take(((pw) / (6.0 * s.round().max(1.0))) as usize).collect();
+        ui.text_shadow(x, y, 1.0 * s, &text, GREEN);
+    }
+    y += 16.0 * s;
+    back_item(app, ui, x, y, cw * 0.6, Page::Extras);
+}
+
+/// A name card when the music changes.
+fn music_toast(app: &App, ui: &mut Ui) {
+    let Some((track, left)) = app.toast else { return };
+    let (w, h, s) = (ui.w, ui.h, ui.s);
+    let name = track.name().to_ascii_uppercase();
+    let (bw, bh) = (ui.text_w(&name, 2.0 * s).max(100.0 * s) + 44.0 * s, 38.0 * s);
+    // Slides in, holds, slides back out.
+    let appear = ((4.5 - left) * 4.0).clamp(0.0, 1.0).min((left * 3.0).clamp(0.0, 1.0));
+    let a = appear * appear * (3.0 - 2.0 * appear);
+    let (x, y) = if app.screen == Screen::Title {
+        (w - (bw + 14.0 * s) * a, 14.0 * s)
+    } else {
+        // Over the player's head when dead, as the bottom of the screen is busy.
+        let base = if app.world.me().alive { h - 118.0 * s } else { h * 0.66 };
+        ((w - bw) * 0.5, base + (1.0 - a) * 30.0 * s)
+    };
+    ui.rect(x, y, bw, bh, [0.03, 0.035, 0.04, 0.85 * a]);
+    ui.rect(x, y, 3.0 * s, bh, [1.0, 0.72, 0.2, a]);
+    // A small eighth note, in rectangles since the font has none.
+    let (nx, ny) = (x + 12.0 * s, y + 8.0 * s);
+    let c = [1.0, 0.72, 0.2, a];
+    ui.rect(nx, ny + 15.0 * s, 8.0 * s, 6.0 * s, c);
+    ui.rect(nx + 6.0 * s, ny, 2.0 * s, 17.0 * s, c);
+    ui.rect(nx + 6.0 * s, ny, 7.0 * s, 3.0 * s, c);
+    ui.text(x + 32.0 * s, y + 6.0 * s, 1.0 * s, "NOW PLAYING", [0.7, 0.7, 0.66, a]);
+    ui.text_shadow(x + 32.0 * s, y + 17.0 * s, 2.0 * s, &name, [0.95, 0.94, 0.9, a]);
+}
+
+fn scale_of_title(title: &str, w: f32, s: f32) -> f32 {
+    (9.0 * s).round().min(((w * 0.9) / (title.len() as f32 * 6.0)).floor()).max(2.0)
+}
+
+/// What the player sees as they die: bars close in, and the cause is named.
+fn death_scene(world: &World, ui: &mut Ui) {
+    use super::player::DeathCause;
+    let (w, h, s) = (ui.w, ui.h, ui.s);
+    let p = world.me();
+    let t = p.death_t;
+    let ease = (t * 1.1).min(1.0);
+    let ease = ease * ease * (3.0 - 2.0 * ease);
+    let (title, sub, tint): (&str, &str, [f32; 3]) = if world.permadeath {
+        ("IT IS OVER", "THERE IS NO COMING BACK FROM THIS ONE", [0.75, 0.75, 0.8])
+    } else {
+        match p.death_cause {
+            DeathCause::Regular => ("ROT", "YOU DIED", [0.85, 0.08, 0.05]),
+            DeathCause::Zombie => ("ONE OF MANY", "THE BITE TAKES HOLD. YOUR BODY WILL GET BACK UP", [0.35, 0.85, 0.2]),
+            DeathCause::Explosion => ("SMITHERINES", "THERE IS NOT MUCH OF YOU LEFT", [1.0, 0.55, 0.12]),
+        }
+    };
+    // A wash of the death's colour, heaviest at the edges.
+    ui.rect(0.0, 0.0, w, h, [tint[0], tint[1], tint[2], 0.07 * ease]);
+    let edge = 90.0 * s;
+    let steps = (edge / 3.0) as i32;
+    for k in 0..steps {
+        let f = 1.0 - k as f32 / steps as f32;
+        let a = 0.26 * ease * f * f;
+        let d = k as f32 * 3.0;
+        ui.rect(d, 0.0, 3.0, h, [tint[0] * 0.5, tint[1] * 0.5, tint[2] * 0.5, a]);
+        ui.rect(w - d - 3.0, 0.0, 3.0, h, [tint[0] * 0.5, tint[1] * 0.5, tint[2] * 0.5, a]);
+    }
+    // Black bars close in, as in a film.
+    let bar = h * 0.115 * ease;
+    ui.rect(0.0, 0.0, w, bar, [0.0, 0.0, 0.0, 0.96]);
+    ui.rect(0.0, h - bar, w, bar, [0.0, 0.0, 0.0, 0.96]);
+    // The title arrives after the impact, a letter at a time.
+    let shown = (((t - 0.35) * 16.0).max(0.0) as usize).min(title.len());
+    if shown > 0 {
+        let scale = scale_of_title(title, w, s);
+        let tw = ui.text_w(title, scale);
+        // High in the frame: the body in the middle is what you should be looking at.
+        let (x, y) = ((w - tw) * 0.5, bar + 16.0 * s);
+        let a = ((t - 0.35) * 3.0).clamp(0.0, 1.0);
+        ui.text(x + scale * 0.5, y + scale * 0.5, scale, &title[..shown], [0.0, 0.0, 0.0, a * 0.8]);
+        ui.text(x, y, scale, &title[..shown], [tint[0].max(0.5), tint[1].max(0.25), tint[2].max(0.2), a]);
+    }
+    let a = ((t - 1.1) * 2.0).clamp(0.0, 1.0);
+    if a > 0.0 {
+        let fit = ((w * 0.92) / (sub.len() as f32 * 6.0)).floor().clamp(1.0, 2.0 * s);
+        ui.text_center(w * 0.5, bar + 16.0 * s + scale_of_title(title, w, s) * 8.0, fit, sub, [0.9, 0.88, 0.82, a]);
+    }
+    if !p.out && !world.game_over {
+        // How long until you are back in it.
+        let k = 1.0 - (p.respawn / 8.0).clamp(0.0, 1.0);
+        let (bw, bh) = (w.min(420.0 * s), 6.0 * s);
+        let y = h - bar - 34.0 * s;
+        ui.text_center(w * 0.5, y - 14.0 * s, 1.0 * s, &format!("REDEPLOY IN {:.0}", p.respawn.ceil().max(0.0)), [0.85, 0.85, 0.8, ease]);
+        ui.bar((w - bw) * 0.5, y, bw, bh, k, [tint[0], tint[1], tint[2], ease]);
+    } else if p.out && !world.game_over {
+        ui.text_center(w * 0.5, h - bar - 34.0 * s, 1.0 * s, "YOU ARE OUT. YOUR TEAM FIGHTS ON", [1.0, 0.6, 0.5, ease]);
+    }
+}
+
+/// The sticks and on-screen buttons.
+fn touch_controls(app: &App, ui: &mut Ui, size: (u32, u32)) {
+    let s = ui.s;
+    let radius = app.touch.radius;
+    for stick in [app.touch.left, app.touch.right].into_iter().flatten() {
+        let (ox, oy) = stick.origin;
+        ui.frame_rect(ox - radius, oy - radius, radius * 2.0, radius * 2.0, 2.0 * s, [1.0, 1.0, 1.0, 0.4]);
+        let v = stick.value(radius) * radius;
+        let nub = 22.0 * s;
+        ui.rect(ox + v.x - nub * 0.5, oy + v.y - nub * 0.5, nub, nub, [1.0, 0.75, 0.3, 0.75]);
+    }
+    if app.touch.left.is_none() && app.touch.right.is_none() && app.build_sel.is_none() {
+        let y = ui.h * 0.62;
+        ui.text_center(ui.w * 0.25, y, 1.0 * s, "DRAG TO MOVE", [1.0, 1.0, 1.0, 0.35]);
+        ui.text_center(ui.w * 0.75, y, 1.0 * s, "DRAG TO AIM AND FIRE", [1.0, 1.0, 1.0, 0.35]);
+    }
+    for b in super::touch::buttons(app, size) {
+        let [x, y, w, h] = b.rect;
+        ui.rect(x, y, w, h, [0.02, 0.025, 0.03, 0.55]);
+        ui.frame_rect(x, y, w, h, 1.0 * s, [1.0, 0.8, 0.45, 0.6]);
+        let sc = (1.0 * s).round().max(1.0);
+        let tw = ui.text_w(b.label, sc);
+        ui.text(x + (w - tw) * 0.5, y + (h - 7.0 * sc) * 0.5, sc, b.label, [1.0, 1.0, 1.0, 0.9]);
+    }
+}
+
+/// The notice that touch controls have switched themselves on.
+fn touch_prompt(app: &mut App, ui: &mut Ui) {
+    let (w, h, s) = (ui.w, ui.h, ui.s);
+    ui.rect(0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55]);
+    let (bw, bh) = ((360.0 * s).min(w * 0.94), 118.0 * s);
+    let (x, y) = ((w - bw) * 0.5, (h - bh) * 0.5);
+    ui.over = true;
+    ui.rect(x, y, bw, bh, [0.05, 0.055, 0.065, 0.98]);
+    ui.frame_rect(x, y, bw, bh, 2.0 * s, ACCENT);
+    ui.text_center(w * 0.5, y + 12.0 * s, 2.0 * s, "TOUCH CONTROLS ON", ACCENT);
+    ui.text_center(w * 0.5, y + 38.0 * s, 1.0 * s, "THIS LOOKS LIKE A TOUCHSCREEN.", WHITE);
+    ui.text_center(w * 0.5, y + 50.0 * s, 1.0 * s, "ON-SCREEN CONTROLS ARE NOW ENABLED.", WHITE);
+    let (b, gap) = (130.0 * s, 12.0 * s);
+    let by = y + bh - 44.0 * s;
+    if ui.button(w * 0.5 - b - gap * 0.5, by, b, 34.0 * s, "OK", 2.0 * s, true) {
+        app.answer_touch_prompt(true);
+    }
+    if ui.button(w * 0.5 + gap * 0.5, by, b, 34.0 * s, "DISABLE", 2.0 * s, true) {
+        app.answer_touch_prompt(false);
+    }
 }
 
 /// Who is here, and for hosts the controls of the server.

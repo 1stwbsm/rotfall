@@ -11,6 +11,7 @@ pub mod net;
 pub mod player;
 pub mod save;
 pub mod structures;
+pub mod touch;
 pub mod view;
 pub mod zombie;
 
@@ -147,8 +148,6 @@ pub struct World {
     pub hit_scratch: Vec<(f32, u32, f32)>,
     pub query_scratch: Vec<u32>,
     pub invincible: bool,
-    /// Forces a track (title screen) instead of following the battle.
-    pub music_override: Option<Track>,
     pub sfx_gain: f32,
 }
 
@@ -228,7 +227,6 @@ impl World {
             hit_scratch: Vec::with_capacity(64),
             query_scratch: Vec::with_capacity(64),
             invincible: false,
-            music_override: None,
             sfx_gain: 1.0,
         };
         w.place_starting_base();
@@ -299,9 +297,28 @@ impl World {
         self.structures.iter().find(|s| s.kind == SKind::Core)
     }
 
+    #[cfg(test)]
+    pub fn wave_track_for_test(&self) -> Track {
+        self.wave_track()
+    }
+
     pub fn wave_track(&self) -> Track {
+        // Permadeath has one death track, and it plays for every kind of death.
+        let me = self.players.get(self.local);
+        if self.permadeath && (self.game_over || me.is_some_and(|p| !p.alive)) {
+            return Track::RestWell;
+        }
         if self.game_over {
             return Track::GameOver;
+        }
+        if let Some(p) = me {
+            if !p.alive {
+                return match p.death_cause {
+                    player::DeathCause::Regular => Track::Rot,
+                    player::DeathCause::Zombie => Track::OneOfMany,
+                    player::DeathCause::Explosion => Track::Smitherines,
+                };
+            }
         }
         match self.phase {
             Phase::Build { .. } => Track::Build,
@@ -385,6 +402,7 @@ impl World {
             let collider = WorldCollider { map: &self.map, blocked_cells: &self.blocked_tiles };
             self.ragdolls.step(dt, &collider);
         }
+        self.track_player_bodies(dt);
         self.bleed_ragdolls();
         self.fx.update(dt);
         self.remove_dead_structures();
@@ -404,7 +422,7 @@ impl World {
             i += 0.1 + (self.wave as f32 * 0.02).min(0.2);
         }
         self.audio.send(Cmd::Intensity(i));
-        self.audio.send(Cmd::Music(self.music_override.unwrap_or_else(|| self.wave_track())));
+        self.audio.send(Cmd::Music(self.wave_track()));
     }
 
     fn ambient_groans(&mut self, dt: f32) {
@@ -873,7 +891,7 @@ mod tests {
         }
         // Freshly spawned zombies are still climbing out of the ground, and immune.
         w.zombies.iter_mut().for_each(|z| z.spawn_t = 0.0);
-        w.explosions.push(Explosion { pos: vec3(30.5, 0.5, 20.0), radius: 8.0, damage: 500.0, from_enemy: false, force: 18.0 });
+        w.explosions.push(Explosion { pos: vec3(30.5, 0.5, 20.0), radius: 8.0, damage: 500.0, from_enemy: false, force: 18.0, spares_players: false, barrel: false });
         let input = player::PlayerInput::default();
         w.update(0.016, &input);
         assert!(w.zombies.len() < 20);

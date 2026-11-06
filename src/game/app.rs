@@ -7,10 +7,11 @@ use super::player::{Player, PlayerInput};
 use super::save::{self, SaveInfo, Slot};
 use super::view::{self, Camera};
 use super::{tile_of, World};
-use crate::audio::{Audio, Cmd, Sfx, Track};
+use super::touch::TouchState;
+use crate::audio::{Audio, Cmd, OstRender, Sfx, Track};
 use crate::render::{FrameData, MenuView};
 use glam::{vec3, Vec2};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use winit::keyboard::KeyCode as K;
 
@@ -26,6 +27,7 @@ pub struct RawInput {
     pub lmb_pressed: bool,
     pub rmb_pressed: bool,
     pub wheel: i32,
+    pub touches: Vec<super::touch::TouchEv>,
 }
 
 impl RawInput {
@@ -60,6 +62,9 @@ pub enum Page {
     Records,
     Options,
     Manual,
+    Extras,
+    Gallery,
+    Soundtrack,
 }
 
 /// Who owns the simulation on this machine.
@@ -94,6 +99,8 @@ pub struct Settings {
     pub music: f32,
     pub sfx: f32,
     pub fullscreen: bool,
+    /// "auto", or "on" and "off" once the player has decided.
+    pub touch: String,
 }
 
 impl Default for Settings {
@@ -109,6 +116,7 @@ impl Default for Settings {
             music: 0.8,
             sfx: 0.9,
             fullscreen: false,
+            touch: "auto".into(),
         }
     }
 }
@@ -129,6 +137,7 @@ impl Settings {
                 "music" => s.music = v.parse::<f32>().unwrap_or(0.8).clamp(0.0, 1.0),
                 "sfx" => s.sfx = v.parse::<f32>().unwrap_or(0.9).clamp(0.0, 1.0),
                 "fullscreen" => s.fullscreen = v == "1",
+                "touch" => s.touch = v.into(),
                 _ => {}
             }
         }
@@ -137,9 +146,9 @@ impl Settings {
 
     fn save(&self, path: &std::path::Path) {
         let text = format!(
-            "name={}\naddress={}\nserver_name={}\nport={}\nmax_players={}\nhost_permadeath={}\nmusic={}\nsfx={}\nfullscreen={}\n",
+            "name={}\naddress={}\nserver_name={}\nport={}\nmax_players={}\nhost_permadeath={}\nmusic={}\nsfx={}\nfullscreen={}\ntouch={}\n",
             self.name, self.address, self.server_name, self.port, self.max_players,
-            u8::from(self.host_permadeath), self.music, self.sfx, u8::from(self.fullscreen)
+            u8::from(self.host_permadeath), self.music, self.sfx, u8::from(self.fullscreen), self.touch
         );
         let _ = save::write_atomic(path, text.as_bytes());
     }
@@ -212,6 +221,17 @@ pub struct App {
     /// Set when a new map exists, so the window layer can repaint the ground.
     pub ground_dirty: bool,
     inputs: Vec<PlayerInput>,
+    /// What is playing, and the name card announcing it.
+    pub music_now: Option<Track>,
+    pub toast: Option<(Track, f32)>,
+    /// A track being auditioned in the Extras menu.
+    pub preview: Option<Track>,
+    pub gallery_i: usize,
+    /// Soundtrack files waiting to render, the one in progress, and what happened last.
+    pub ost_queue: VecDeque<Track>,
+    pub ost: Option<OstRender>,
+    pub ost_status: String,
+    pub touch: TouchState,
 }
 
 const WEAPON_KEYS: [K; 9] = [K::Digit1, K::Digit2, K::Digit3, K::Digit4, K::Digit5, K::Digit6, K::Digit7, K::Digit8, K::Digit9];
@@ -226,7 +246,6 @@ impl App {
     /// `dir` holds saves, settings and records.
     pub fn with_dir(seed: u64, audio: Audio, dir: PathBuf) -> App {
         let settings = Settings::load(&dir.join("config.txt"));
-        audio.send(Cmd::Music(Track::Menu));
         audio.send(Cmd::MusicVolume(settings.music));
         audio.send(Cmd::SfxVolume(settings.sfx));
         let want_fullscreen = settings.fullscreen.then_some(true);
@@ -268,6 +287,14 @@ impl App {
             autoplay: false,
             ground_dirty: false,
             inputs: Vec::new(),
+            music_now: None,
+            toast: None,
+            preview: None,
+            gallery_i: 0,
+            ost_queue: VecDeque::new(),
+            ost: None,
+            ost_status: String::new(),
+            touch: TouchState::default(),
         };
         app.refresh_saves();
         app
@@ -505,7 +532,6 @@ impl App {
         self.autoplay = false;
         self.screen = Screen::Title;
         self.page = Page::Main;
-        self.audio.send(Cmd::Music(Track::Menu));
         self.audio.send(Cmd::Intensity(0.0));
         self.refresh_saves();
     }
@@ -580,6 +606,7 @@ impl App {
                     }
                     self.page = match self.page {
                         Page::Host | Page::Join | Page::Connecting => Page::Multiplayer,
+                        Page::Gallery | Page::Soundtrack => Page::Extras,
                         _ => Page::Main,
                     };
                     self.focus = None;
@@ -616,10 +643,14 @@ impl App {
                 }
             }
         }
+        self.update_music_state(dt);
+        self.advance_soundtrack_export();
         if self.screen != Screen::Title {
             if self.world.game_over {
                 self.on_game_over();
-                if self.screen == Screen::Playing && self.world.game_over_timer > 1.5 {
+                // Permadeath lingers on the body before the numbers come up.
+                let linger = if self.world.permadeath { 4.0 } else { 1.5 };
+                if self.screen == Screen::Playing && self.world.game_over_timer > linger {
                     self.screen = Screen::GameOver;
                     self.armory_open = false;
                     self.build_sel = None;
@@ -656,8 +687,62 @@ impl App {
         }
     }
 
+    /// Starts whatever should be playing, and announces it with a name card when it changes.
+    fn update_music_state(&mut self, dt: f32) {
+        if self.page != Page::Soundtrack || self.screen != Screen::Title {
+            self.preview = None;
+        }
+        let want = if self.screen == Screen::Title { self.preview.unwrap_or(Track::Menu) } else { self.world.wave_track() };
+        if self.music_now != Some(want) {
+            self.music_now = Some(want);
+            self.audio.send(Cmd::Music(want));
+            if self.screen == Screen::Title {
+                self.audio.send(Cmd::Intensity(if self.preview.is_some() { 1.0 } else { 0.0 }));
+            }
+            if self.settings.music > 0.0 {
+                self.toast = Some((want, 4.5));
+            }
+        }
+        if let Some(t) = &mut self.toast {
+            t.1 -= dt;
+            if t.1 <= 0.0 {
+                self.toast = None;
+            }
+        }
+    }
+
+    /// Queues soundtrack files for rendering and saving.
+    pub fn queue_soundtrack(&mut self, tracks: &[Track]) {
+        for t in tracks {
+            if !self.ost_queue.contains(t) && self.ost.as_ref().is_none_or(|r| r.track != *t) {
+                self.ost_queue.push_back(*t);
+            }
+        }
+    }
+
+    /// Does a slice of rendering each frame, so the menus keep moving while files are made.
+    fn advance_soundtrack_export(&mut self) {
+        if self.ost.is_none() {
+            self.ost = self.ost_queue.pop_front().map(OstRender::new);
+        }
+        let Some(r) = &mut self.ost else { return };
+        // Slices are sized for the browser, which shares this thread with everything else.
+        let slice = if cfg!(target_arch = "wasm32") { 4096 } else { 16384 };
+        if r.advance(slice) {
+            let name = r.file_name();
+            self.ost_status = match crate::storage::deliver(&name, &r.wav()) {
+                Ok(place) => format!("SAVED {name} TO {place}"),
+                Err(e) => format!("COULD NOT SAVE {name}: {e}"),
+            };
+            self.ost = None;
+        }
+    }
+
     /// Advances whichever kind of simulation this session runs.
     fn step_world(&mut self, dt: f32, input: PlayerInput) {
+        // The moment of death runs in slow motion, if no other players are relying on the clock.
+        let me = self.world.me();
+        let dt = if !self.is_multiplayer() && !me.alive && me.death_t < 0.4 { dt * 0.3 } else { dt };
         match &mut self.session {
             Session::Solo => self.world.update(dt, &input),
             Session::Host(server) => {
@@ -694,7 +779,8 @@ impl App {
     /// Whichever player the camera should follow: yourself, or a teammate once you are out.
     fn camera_player(&self) -> &Player {
         let me = self.world.me();
-        if me.out {
+        // Stay with the body for a moment, before moving on to whoever is left.
+        if me.out && me.death_t > 4.0 {
             if let Some(p) = self.world.players.iter().find(|p| p.alive && p.connected) {
                 return p;
             }
@@ -703,6 +789,10 @@ impl App {
     }
 
     fn update_camera(&mut self, dt: f32, w: f32, h: f32) {
+        // Death pulls in close on the body.
+        let close = !self.world.me().alive && !(self.world.me().out && self.world.me().death_t > 4.0);
+        let target_punch = if close { 0.58 } else { 1.0 };
+        self.cam.punch += (target_punch - self.cam.punch) * (dt * if close { 1.6 } else { 3.0 }).min(1.0);
         let p = self.camera_player();
         // Look-ahead toward the cursor so that you see what you are aiming at.
         let mut target = p.pos;
@@ -879,6 +969,15 @@ impl App {
                 }
             }
         }
+        if self.touch_play() {
+            let building = self.build_sel.is_some();
+            let cursor_aim = input.aim;
+            self.apply_touch(&mut input);
+            if building {
+                input.aim = cursor_aim;
+                input.fire = false;
+            }
+        }
         self.step_world(dt, input);
     }
 
@@ -897,8 +996,12 @@ impl App {
             frame.menu = Some(MenuView {
                 time: self.menu_t,
                 mouse: [raw.mouse.0 / w * 2.0 - 1.0, raw.mouse.1 / h * 2.0 - 1.0],
-                logo: super::hud::logo_rect(size),
-                dim: 1.0,
+                logo: match (self.page, super::hud::gallery_rect(self.gallery_i, size)) {
+                    (Page::Gallery, r) => r,
+                    _ => super::hud::logo_rect(size),
+                },
+                dim: if self.page == Page::Gallery { 2.0 } else { 1.0 },
+                gallery: (self.page == Page::Gallery).then_some(self.gallery_i),
             });
         } else {
             let ghost = self.build_ghost();
@@ -922,6 +1025,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::player::DeathCause;
+    use crate::game::touch::{TouchEv, TouchPhase};
     use crate::render::FrameData;
 
     const SIZE: (u32, u32) = (1600, 900);
@@ -1121,7 +1226,7 @@ mod tests {
         assert_eq!(d.app.world.wave, 1, "ENTER starts the wave early");
         let i = d.app.world.structures.iter().position(|s| s.kind == SKind::Core).unwrap();
         d.app.world.structures[i].hp = 0.0;
-        d.run(150);
+        d.run(220);
         assert_eq!(d.app.screen, Screen::GameOver);
         d.app.action = Some(Action::NewGame { permadeath: false });
         d.step();
@@ -1189,9 +1294,9 @@ mod tests {
         d.run(2);
         assert!(d.app.ui_note.as_ref().unwrap().0.contains("NO GOING BACK"));
         d.app.world.scrap = 4242;
-        d.app.world.hurt_player(0, 1000.0, glam::Vec3::ZERO);
+        d.app.world.hurt_player(0, 1000.0, glam::Vec3::ZERO, crate::game::player::DeathCause::Regular);
         assert!(d.app.world.game_over, "one death ends it");
-        d.run(120);
+        d.run(60 * 6);
         assert_eq!(d.app.screen, Screen::GameOver);
         assert!(d.app.save_erased);
         assert!(d.app.slot_info(Slot::Permadeath).is_none(), "the save must be gone");
@@ -1205,9 +1310,9 @@ mod tests {
     #[test]
     fn standard_mode_death_only_costs_time() {
         let mut d = started("standard_death");
-        d.app.world.hurt_player(0, 1000.0, glam::Vec3::ZERO);
+        d.app.world.hurt_player(0, 1000.0, glam::Vec3::ZERO, crate::game::player::DeathCause::Regular);
         assert!(!d.app.world.game_over);
-        d.run(60 * 9);
+        d.run(60 * 10);
         assert!(d.app.world.me().alive, "redeployed");
     }
 
@@ -1345,11 +1450,247 @@ mod tests {
         assert_eq!(e.app.settings.music, 0.25);
     }
 
+    fn touch(d: &mut Driver, id: u64, phase: TouchPhase, x: f32, y: f32) {
+        d.raw.touches.push(TouchEv { id, phase, x, y });
+    }
+
+    /// The window layer's frame order: touches first, then the game.
+    fn touch_step(d: &mut Driver) {
+        d.app.begin_frame(&mut d.raw, SIZE);
+        d.step();
+    }
+
+    #[test]
+    fn touch_mode_turns_on_for_small_screens_and_asks() {
+        let mut d = Driver::new("touch_detect");
+        d.app.detect_device((1920.0, 1080.0), false, false);
+        assert!(!d.app.touch.enabled, "a desktop stays a desktop");
+        d.app.detect_device((1920.0, 1080.0), true, false);
+        assert!(!d.app.touch.enabled, "a big touch laptop stays a desktop too");
+        d.app.detect_device((390.0, 844.0), true, false);
+        assert!(d.app.touch.enabled && d.app.touch.prompt, "a phone gets controls and the notice");
+        d.app.answer_touch_prompt(false);
+        assert!(!d.app.touch.enabled && !d.app.touch.prompt);
+        // Disable sticks across restarts.
+        let mut e = Driver::new_keep("touch_detect");
+        e.app.detect_device((390.0, 844.0), true, false);
+        assert!(!e.app.touch.enabled && !e.app.touch.prompt, "disabled means disabled");
+        e.app.settings.touch = "auto".into();
+        e.app.detect_device((800.0, 1200.0), true, false);
+        assert!(e.app.touch.enabled, "a tablet counts");
+        e.app.answer_touch_prompt(true);
+        let mut f = Driver::new_keep("touch_detect");
+        f.app.detect_device((390.0, 844.0), true, false);
+        assert!(f.app.touch.enabled && !f.app.touch.prompt, "Ok is only asked once");
+    }
+
+    #[test]
+    fn sticks_move_aim_and_fire() {
+        let mut d = started("touch_play");
+        d.app.touch.enabled = true;
+        let start = d.app.world.me().pos;
+        touch(&mut d, 1, TouchPhase::Start, 400.0, 600.0);
+        touch_step(&mut d);
+        touch(&mut d, 1, TouchPhase::Move, 600.0, 600.0);
+        for _ in 0..30 {
+            touch_step(&mut d);
+        }
+        assert!(d.app.world.me().pos.x > start.x + 1.0, "the left stick walks");
+        let mag = d.app.world.me().mag[SIDEARM];
+        touch(&mut d, 2, TouchPhase::Start, 1200.0, 600.0);
+        touch_step(&mut d);
+        touch(&mut d, 2, TouchPhase::Move, 1200.0, 450.0);
+        for _ in 0..40 {
+            touch_step(&mut d);
+        }
+        assert!(d.app.world.me().mag[SIDEARM] < mag, "pushing the right stick fires");
+        assert!(d.app.world.me().facing.y < -0.8, "up on the stick aims up the screen: {:?}", d.app.world.me().facing);
+        touch(&mut d, 2, TouchPhase::End, 1200.0, 450.0);
+        touch(&mut d, 1, TouchPhase::End, 600.0, 600.0);
+        touch_step(&mut d);
+        assert!(d.app.touch.left.is_none() && d.app.touch.right.is_none());
+    }
+
+    #[test]
+    fn on_screen_buttons_press_keys_and_menus_take_taps() {
+        let mut d = started("touch_buttons");
+        d.app.touch.enabled = true;
+        let b = crate::game::touch::buttons(&d.app, SIZE);
+        let armory = b.iter().find(|x| x.label == "ARMORY").unwrap().rect;
+        touch(&mut d, 7, TouchPhase::Start, armory[0] + 5.0, armory[1] + 5.0);
+        touch(&mut d, 7, TouchPhase::End, armory[0] + 5.0, armory[1] + 5.0);
+        touch_step(&mut d);
+        assert!(d.app.armory_open, "the ARMORY button opens the armory");
+        assert!(d.app.touch.left.is_none(), "and it is not also a stick");
+        // In a menu, a quick tap in a single frame still lands as a click where it was aimed.
+        let s = 1.5;
+        let cw = (1600.0f32 - 80.0).min(1500.0 * s) / 3.0;
+        let total_h = 56.0 * s * 6.0 + 112.0 * s;
+        let (x0, y0) = ((1600.0 - cw * 3.0) * 0.5, (900.0 - total_h) * 0.5);
+        d.app.world.scrap = 900;
+        let (x, y) = (x0 + cw * 1.3, y0 + 30.0 * s + 20.0);
+        touch(&mut d, 8, TouchPhase::Start, x, y);
+        touch(&mut d, 8, TouchPhase::End, x, y);
+        for _ in 0..4 {
+            touch_step(&mut d);
+        }
+        assert!(d.app.world.me().owned[1], "a tap buys the gun under the finger");
+    }
+
+    #[test]
+    fn touch_buttons_stay_clear_of_the_hud_on_small_screens() {
+        let mut d = started("touch_layout");
+        d.app.touch.enabled = true;
+        for size in [(948u32, 375u32), (1280, 590), (1600, 900), (2400, 1080)] {
+            let s = crate::game::hud::ui_scale(&d.app, size);
+            let (w, h) = (size.0 as f32, size.1 as f32);
+            // The weapon panel and vitals along the bottom, and the build bar.
+            let panel_top = h - 14.0 * s - 62.0 * s - 24.0 * s;
+            let bar_top = h - 200.0 * s;
+            d.app.build_sel = None;
+            for b in crate::game::touch::buttons(&d.app, size) {
+                let [x, y, bw, bh] = b.rect;
+                assert!(x >= 0.0 && x + bw <= w && y >= 0.0, "{} is off a {size:?} screen", b.label);
+                assert!(y + bh <= panel_top, "{} overlaps the bottom panels on {size:?}: {} vs {panel_top}", b.label, y + bh);
+            }
+            d.app.build_sel = Some(0);
+            for b in crate::game::touch::buttons(&d.app, size) {
+                let [x, y, bw, bh] = b.rect;
+                assert!(x + bw <= w, "{} is off a {size:?} screen", b.label);
+                assert!(y + bh <= bar_top, "{} overlaps the build bar on {size:?}", b.label);
+            }
+        }
+    }
+
+    #[test]
+    fn a_blast_knocks_you_down_helpless_until_you_get_up() {
+        let mut d = started("knockdown");
+        let at = d.app.world.me().pos;
+        let hp = d.app.world.me().hp;
+        d.app.world.explosions.push(crate::game::combat::Explosion { pos: at + glam::Vec3::X, radius: 7.0, damage: 60.0, from_enemy: false, force: 20.0, spares_players: false, barrel: false });
+        d.step();
+        assert!(d.app.world.me().down_t > 0.0, "thrown down");
+        assert!(d.app.world.me().alive);
+        assert!(d.app.world.ragdolls.bodies.iter().any(|b| b.owner == 0), "as a ragdoll");
+        // No moving or shooting from the ground.
+        let mag = d.app.world.me().mag[SIDEARM];
+        let before = d.app.world.me().pos;
+        d.raw.down.insert(K::KeyD);
+        d.raw.lmb = true;
+        d.run(30);
+        d.raw.down.clear();
+        d.raw.lmb = false;
+        assert_eq!(d.app.world.me().mag[SIDEARM], mag, "no shooting while down");
+        assert!(d.app.world.me().pos.distance(before) < 4.0);
+        // Hits land at double strength.
+        let was = d.app.world.me().hp;
+        d.app.world.hurt_player(0, 5.0, at, DeathCause::Regular);
+        assert!((was - d.app.world.me().hp - 10.0).abs() < 0.01, "helpless on the ground");
+        assert!(hp > was || hp == was);
+        // And eventually back up, with the body gone and a stand-up animation first.
+        d.run(60 * 4);
+        assert_eq!(d.app.world.me().down_t, 0.0);
+        assert!(d.app.world.ragdolls.bodies.iter().all(|b| b.owner != 0));
+        assert!(d.app.world.me().alive);
+        let start = d.app.world.me().pos;
+        d.raw.down.insert(K::KeyD);
+        d.run(40);
+        d.raw.down.clear();
+        assert!(d.app.world.me().pos.x > start.x + 0.5, "free to move again");
+    }
+
+    #[test]
+    fn explosive_barrels_ragdoll_the_player_across_their_whole_blast() {
+        // Near the middle of the blast, at its edge, and just outside it.
+        for (distance, thrown) in [(1.5f32, true), (4.0, true), (6.5, true), (8.5, false)] {
+            let mut d = started("barrel_knock");
+            d.app.world.barrels.clear();
+            let at = d.app.world.me().pos + glam::Vec3::X * distance;
+            d.app.world.barrels.push(crate::game::Barrel { pos: at, hp: 0.0, burn: 0.0 });
+            d.step();
+            assert!(d.app.world.me().alive, "a barrel alone should not kill from full health at {distance} m");
+            let down = d.app.world.me().down_t > 0.0;
+            assert_eq!(down, thrown, "at {distance} m");
+            assert_eq!(d.app.world.ragdolls.bodies.iter().any(|b| b.owner == 0), thrown, "ragdoll at {distance} m");
+        }
+    }
+
+    #[test]
+    fn each_kind_of_death_has_its_track() {
+        let cases = [
+            (DeathCause::Regular, Track::Rot),
+            (DeathCause::Zombie, Track::OneOfMany),
+            (DeathCause::Explosion, Track::Smitherines),
+        ];
+        for (cause, track) in cases {
+            let mut d = started("death_tracks");
+            assert_eq!(d.app.music_now, Some(Track::Build));
+            d.app.world.hurt_player(0, 1000.0, glam::Vec3::ZERO, cause);
+            d.run(2);
+            assert_eq!(d.app.music_now, Some(track), "{cause:?}");
+            assert_eq!(d.app.toast.as_ref().map(|t| t.0), Some(track), "the name card should announce it");
+            d.run(60 * 12);
+            assert!(d.app.world.me().alive);
+            assert_eq!(d.app.music_now, Some(Track::Build), "back to the music after redeploying");
+        }
+    }
+
+    #[test]
+    fn permadeath_only_ever_plays_its_own_death_track() {
+        for cause in [DeathCause::Regular, DeathCause::Zombie, DeathCause::Explosion] {
+            let mut d = Driver::new("perma_track");
+            d.run(1);
+            d.app.action = Some(Action::NewGame { permadeath: true });
+            d.run(2);
+            d.app.world.hurt_player(0, 1000.0, glam::Vec3::ZERO, cause);
+            d.run(2);
+            assert_eq!(d.app.music_now, Some(Track::RestWell), "{cause:?}");
+        }
+    }
+
+    #[test]
+    fn killed_by_zombies_your_body_rises_when_you_respawn() {
+        let mut d = started("rising");
+        d.app.world.hurt_player(0, 1000.0, glam::Vec3::ZERO, DeathCause::Zombie);
+        assert_eq!(d.app.world.zombies.len(), 0);
+        let bodies = d.app.world.ragdolls.bodies.len();
+        assert!(bodies >= 1);
+        // Look at the moment of respawn: left alone, the base's sentries soon shoot it down.
+        while !d.app.world.me().alive {
+            d.step();
+        }
+        let risen: Vec<_> = d.app.world.zombies.iter().filter(|z| z.style >> 24 == 8).collect();
+        assert_eq!(risen.len(), 1, "the old body should be up and walking");
+        assert!(risen[0].kind == ZKind::Walker);
+        assert!(d.app.world.ragdolls.bodies.iter().all(|b| b.owner != 0), "and no longer a corpse");
+        // Any other death leaves the body where it fell.
+        let mut e = started("no_rising");
+        e.app.world.hurt_player(0, 1000.0, glam::Vec3::ZERO, DeathCause::Regular);
+        e.run(60 * 12);
+        assert!(e.app.world.me().alive);
+        assert!(e.app.world.zombies.iter().all(|z| z.style >> 24 != 8));
+    }
+
+    #[test]
+    fn the_title_screen_names_its_music_and_exports_the_soundtrack() {
+        let mut d = Driver::new("ost");
+        d.run(2);
+        assert_eq!(d.app.music_now, Some(Track::Menu));
+        assert_eq!(d.app.toast.as_ref().map(|t| t.0.name()), Some("Descent"));
+        d.app.page = Page::Soundtrack;
+        d.app.preview = Some(Track::Boss);
+        d.run(2);
+        assert_eq!(d.app.music_now, Some(Track::Boss), "auditioning a track plays it");
+        d.app.page = Page::Extras;
+        d.run(2);
+        assert_eq!(d.app.music_now, Some(Track::Menu), "leaving the list stops it");
+    }
+
     #[test]
     fn every_menu_page_draws_without_panicking() {
         let mut d = Driver::new("pages");
         d.app.lan = None;
-        for p in [Page::Main, Page::NewGame, Page::Multiplayer, Page::Host, Page::Join, Page::Records, Page::Options, Page::Manual] {
+        for p in [Page::Main, Page::NewGame, Page::Multiplayer, Page::Host, Page::Join, Page::Records, Page::Options, Page::Manual, Page::Extras, Page::Gallery, Page::Soundtrack] {
             d.app.page = p;
             d.raw.mouse = (300.0, 400.0);
             d.run(3);

@@ -75,7 +75,9 @@ pub enum Ev {
     Blast { pos: Vec3, radius: f32, force: f32 },
     ZombieDied { id: u32, dir: Vec3, point: Vec3, force: f32, gore: f32, flags: u8 },
     Severed { id: u32, mask: u16 },
-    PlayerDied { player: u8, away: Vec3 },
+    PlayerDied { player: u8, away: Vec3, cause: u8 },
+    PlayerDown { player: u8, from: Vec3, force: f32 },
+    CorpseRose { player: u8 },
     Recoil { player: u8, kick: f32 },
 }
 

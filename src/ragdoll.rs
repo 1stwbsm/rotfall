@@ -186,6 +186,8 @@ pub struct Ragdoll {
     pub right_hint: Vec3,
     /// Burn amount for rendering, 0..1.
     pub char_amount: f32,
+    /// The player this body currently is, or -1.
+    pub owner: i16,
 }
 
 impl Ragdoll {
@@ -307,6 +309,7 @@ impl RagdollWorld {
             bleed: [(0, 0.0); 3],
             right_hint: (pos[R_HIP] - pos[L_HIP]).try_normalize().unwrap_or(Vec3::X),
             char_amount: 0.0,
+            owner: -1,
         });
         self.bodies.len() - 1
     }

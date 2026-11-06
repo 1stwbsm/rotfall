@@ -21,7 +21,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
-pub const PROTOCOL: u16 = 1;
+pub const PROTOCOL: u16 = 2;
 pub const DEFAULT_PORT: u16 = 27416;
 pub const BEACON_PORT: u16 = 27417;
 const SNAP_INTERVAL: f32 = 1.0 / 30.0;
@@ -334,10 +334,21 @@ pub fn write_ev(w: &mut Writer, e: &Ev) {
             w.u32(*id);
             w.u16(*mask);
         }
-        Ev::PlayerDied { player, away } => {
+        Ev::PlayerDied { player, away, cause } => {
             w.u8(23);
             w.u8(*player);
             w.q3(*away);
+            w.u8(*cause);
+        }
+        Ev::PlayerDown { player, from, force } => {
+            w.u8(25);
+            w.u8(*player);
+            w.q3(*from);
+            w.q(*force);
+        }
+        Ev::CorpseRose { player } => {
+            w.u8(26);
+            w.u8(*player);
         }
         Ev::Recoil { player, kick } => {
             w.u8(24);
@@ -386,7 +397,9 @@ pub fn read_ev(r: &mut Reader) -> Option<Ev> {
         20 => Ev::Blast { pos: r.q3()?, radius: r.q()?, force: r.q()? },
         21 => Ev::ZombieDied { id: r.u32()?, dir: r.q3()?, point: r.q3()?, force: r.q()?, gore: r.q()?, flags: r.u8()? },
         22 => Ev::Severed { id: r.u32()?, mask: r.u16()? },
-        23 => Ev::PlayerDied { player: r.u8()?, away: r.q3()? },
+        23 => Ev::PlayerDied { player: r.u8()?, away: r.q3()?, cause: r.u8()? },
+        25 => Ev::PlayerDown { player: r.u8()?, from: r.q3()?, force: r.q()? },
+        26 => Ev::CorpseRose { player: r.u8()? },
         24 => Ev::Recoil { player: r.u8()?, kick: r.q()? },
         _ => return None,
     })
@@ -430,10 +443,21 @@ pub fn apply_event(w: &mut World, e: &Ev) {
                 }
             }
         }
-        Ev::PlayerDied { player, away } => {
+        Ev::PlayerDied { player, away, cause } => {
             if (*player as usize) < w.players.len() {
-                w.player_death_visual(*player as usize, *away);
+                w.player_death_visual(*player as usize, *away, super::player::DeathCause::from_u8(*cause));
             }
+        }
+        Ev::PlayerDown { player, from, force } => {
+            let i = *player as usize;
+            if i < w.players.len() && w.players[i].alive {
+                w.players[i].down_t = 1.0;
+                w.knockdown_visual(i, *from, *force);
+            }
+        }
+        Ev::CorpseRose { player } => {
+            let i = *player as i16;
+            w.ragdolls.bodies.retain(|b| b.owner != i);
         }
         Ev::Recoil { player, kick } => {
             if *player as usize == w.local {
@@ -508,7 +532,7 @@ fn write_snapshot(world: &World, player: usize, complete: bool, known: &mut Hash
     // Players.
     w.u8(world.players.len() as u8);
     for (i, p) in world.players.iter().enumerate() {
-        let f = u8::from(p.alive) | u8::from(p.connected) << 1 | u8::from(p.out) << 2 | u8::from(p.roll_t > 0.0) << 3 | u8::from(p.on_depot) << 4;
+        let f = u8::from(p.alive) | u8::from(p.connected) << 1 | u8::from(p.out) << 2 | u8::from(p.roll_t > 0.0) << 3 | u8::from(p.on_depot) << 4 | u8::from(p.down_t > 0.0) << 5;
         w.u8(f);
         w.q2(p.pos2());
         w.q2(p.vel);
@@ -701,10 +725,23 @@ fn apply_snapshot(w: &mut World, r: &mut Reader) -> Option<()> {
         p.respawn = respawn;
         p.hurt = p.hurt.max(hurt);
         p.net_target = pos;
+        let down = f & 32 != 0;
+        let was_down = p.down_t > 0.0;
+        if !down && was_down {
+            w.finish_knockdown(i);
+        }
+        // A body whose owner is back on their feet elsewhere is just a corpse now.
+        if p_alive_again(was_alive, f) {
+            w.ragdolls.bodies.iter_mut().filter(|b| b.owner == i as i16).for_each(|b| b.owner = -1);
+        }
+        let p = &mut w.players[i];
+        if down {
+            p.down_t = p.down_t.max(1.0);
+        }
         if i == local {
             // The client owns its own position, except when the server has just placed it.
             let placed = seq != p.respawn_seq || (p.alive && !was_alive);
-            if placed || !p.alive {
+            if placed && !down || !p.alive && p.death_t <= 0.0 {
                 p.pos.x = pos.x;
                 p.pos.z = pos.y;
                 p.vel = Vec2::ZERO;
@@ -731,7 +768,7 @@ fn apply_snapshot(w: &mut World, r: &mut Reader) -> Option<()> {
             p.vel = vel;
             p.facing = face;
             p.roll_t = if f & 8 != 0 { 0.1 } else { 0.0 };
-            if !was_alive || p.pos2().distance(pos) > 6.0 {
+            if (!was_alive || p.pos2().distance(pos) > 6.0) && !down {
                 p.pos.x = pos.x;
                 p.pos.z = pos.y;
             }
@@ -852,6 +889,10 @@ fn apply_snapshot(w: &mut World, r: &mut Reader) -> Option<()> {
     Some(())
 }
 
+fn p_alive_again(was_alive: bool, flags: u8) -> bool {
+    !was_alive && flags & 1 != 0
+}
+
 fn new_client_structure(w: &mut World, kind: SKind, tile: (i32, i32)) -> Structure {
     let mut s = w.make_structure_for_load(kind, tile);
     s.pos = if kind == SKind::Core {
@@ -880,7 +921,8 @@ pub fn update_client(w: &mut World, dt: f32, input: &PlayerInput) {
     for (i, p) in w.players.iter_mut().enumerate() {
         p.recoil = (p.recoil - dt * 4.0).max(0.0);
         p.hurt = (p.hurt - dt * 2.0).max(0.0);
-        if i != local {
+        p.getup_t = (p.getup_t - dt).max(0.0);
+        if i != local && p.down_t <= 0.0 {
             let cur = p.pos2();
             let next = cur + (p.net_target + p.vel * 0.03 - cur) * (dt * 12.0).min(1.0);
             p.walk += (next - cur).length() * 1.55;
@@ -892,7 +934,8 @@ pub fn update_client(w: &mut World, dt: f32, input: &PlayerInput) {
         if input.toggle_light {
             w.players[local].flashlight = !w.players[local].flashlight;
         }
-        if w.players[local].alive {
+        let busy = w.players[local].down_t > 0.0 || w.players[local].getup_t > 0.0;
+        if w.players[local].alive && !busy {
             let p = &mut w.players[local];
             let aim2 = Vec2::new(input.aim.x - p.pos.x, input.aim.z - p.pos.z);
             if aim2.length_squared() > 0.04 {
@@ -939,6 +982,7 @@ pub fn update_client(w: &mut World, dt: f32, input: &PlayerInput) {
         let collider = super::map::WorldCollider { map: &w.map, blocked_cells: &w.blocked_tiles };
         w.ragdolls.step(dt, &collider);
     }
+    w.track_player_bodies(dt);
     w.bleed_ragdolls();
     w.fx.update(dt);
     w.update_music();
@@ -1291,7 +1335,7 @@ impl Server {
                 }
                 let p = world.players.get_mut(idx)?;
                 // Ignore stale positions sent before the client heard about a respawn.
-                if p.alive && seq == p.respawn_seq {
+                if p.alive && p.down_t <= 0.0 && p.getup_t <= 0.0 && seq == p.respawn_seq {
                     let lim = super::map::HALF - 1.0;
                     let q = pos.clamp(Vec2::splat(-lim), Vec2::splat(lim));
                     p.pos.x = q.x;
@@ -1930,7 +1974,9 @@ mod tests {
             Ev::Blast { pos: a, radius: 4.0, force: 12.0 },
             Ev::ZombieDied { id: 77, dir: b, point: a, force: 9.0, gore: 0.5, flags: 5 },
             Ev::Severed { id: 12, mask: crate::ragdoll::MASK_L_ARM },
-            Ev::PlayerDied { player: 2, away: a },
+            Ev::PlayerDied { player: 2, away: a, cause: 2 },
+            Ev::PlayerDown { player: 1, from: b, force: 12.0 },
+            Ev::CorpseRose { player: 3 },
             Ev::Recoil { player: 1, kick: 0.3 },
         ]
     }
@@ -2128,7 +2174,7 @@ mod tests {
         let mut rig = Rig::new(ServerConfig::default());
         rig.join("dave", "").unwrap();
         rig.run(10);
-        rig.host.hurt_player(1, 500.0, Vec3::ZERO);
+        rig.host.hurt_player(1, 500.0, Vec3::ZERO, crate::game::player::DeathCause::Regular);
         assert!(!rig.host.players[1].alive);
         rig.run(20);
         assert!(!rig.clients[0].0.players[1].alive, "the client should know it died");
@@ -2139,6 +2185,65 @@ mod tests {
         let (cw, _) = &rig.clients[0];
         assert!(cw.players[1].alive, "and that it came back");
         assert!(cw.players[1].pos.distance(rig.host.players[1].pos) < 1.0, "at the server's chosen spot");
+    }
+
+    #[test]
+    fn knockdowns_reach_the_client_and_it_cannot_walk_away() {
+        use crate::game::player::DeathCause;
+        let mut rig = Rig::new(ServerConfig::default());
+        rig.join("kay", "").unwrap();
+        rig.run(10);
+        let at = rig.host.players[1].pos + Vec3::X;
+        rig.host.knock_down(1, at, 22.0);
+        rig.run(10);
+        let (cw, _) = &rig.clients[0];
+        assert!(cw.players[1].down_t > 0.0, "the client should know it is down");
+        assert!(cw.ragdolls.bodies.iter().any(|b| b.owner == 1), "with its own ragdoll");
+        // Walking does nothing, and the server ignores position updates meanwhile.
+        let before = rig.host.players[1].pos;
+        let walk = PlayerInput { move_dir: Vec2::X, aim: vec3(50.0, 1.2, 5.0), ..Default::default() };
+        for _ in 0..20 {
+            rig.step(PlayerInput::default(), walk);
+            std::thread::sleep(Duration::from_micros(300));
+        }
+        assert!(rig.host.players[1].down_t > 0.0);
+        assert!(rig.host.players[1].pos.distance(before) < 5.0);
+        // Then up again, everywhere, with both machines agreeing where.
+        rig.host.players[1].down_t = 0.01;
+        rig.run(60);
+        let (cw, _) = &rig.clients[0];
+        assert_eq!(rig.host.players[1].down_t, 0.0);
+        assert_eq!(cw.players[1].down_t, 0.0, "the client should be back up");
+        assert!(cw.ragdolls.bodies.iter().all(|b| b.owner != 1), "its ragdoll gone");
+        assert!(cw.players[1].pos.distance(rig.host.players[1].pos) < 1.5, "{} vs {}", cw.players[1].pos, rig.host.players[1].pos);
+        // A death while down goes through the same body.
+        rig.host.knock_down(1, at, 22.0);
+        rig.run(5);
+        rig.host.hurt_player(1, 1000.0, at, DeathCause::Explosion);
+        rig.run(10);
+        let (cw, _) = &rig.clients[0];
+        assert!(!cw.players[1].alive);
+        assert_eq!(cw.players[1].death_cause, DeathCause::Explosion);
+        assert_eq!(cw.ragdolls.bodies.iter().filter(|b| b.owner == 1).count(), 1, "one body, not two");
+        assert_eq!(cw.wave_track_for_test(), crate::audio::Track::Smitherines, "the client hears its own death");
+    }
+
+    #[test]
+    fn a_body_that_rises_does_so_for_everyone() {
+        use crate::game::player::DeathCause;
+        let mut rig = Rig::new(ServerConfig::default());
+        rig.join("zed", "").unwrap();
+        rig.run(10);
+        rig.host.hurt_player(1, 1000.0, Vec3::ZERO, DeathCause::Zombie);
+        rig.run(10);
+        assert!(rig.clients[0].0.ragdolls.bodies.iter().any(|b| b.owner == 1));
+        rig.host.players[1].respawn = 0.01;
+        rig.run(20);
+        assert!(rig.host.players[1].alive);
+        assert!(rig.host.zombies.iter().any(|z| z.style >> 24 == 8), "up on the server");
+        let (cw, _) = &rig.clients[0];
+        assert!(cw.zombies.iter().any(|z| z.style >> 24 == 8), "and on the client");
+        assert!(cw.ragdolls.bodies.iter().all(|b| b.owner != 1), "the corpse is gone");
     }
 
     #[test]
@@ -2181,14 +2286,14 @@ mod tests {
         let mut rig = Rig::new(ServerConfig { permadeath: true, ..Default::default() });
         rig.join("ivan", "").unwrap();
         rig.run(10);
-        rig.host.hurt_player(1, 500.0, Vec3::ZERO);
+        rig.host.hurt_player(1, 500.0, Vec3::ZERO, crate::game::player::DeathCause::Regular);
         assert!(rig.host.players[1].out);
         assert!(!rig.host.game_over, "a teammate is still alive");
         for _ in 0..600 {
             rig.host.update_all(1.0 / 60.0, &[]);
         }
         assert!(!rig.host.players[1].alive, "no respawn in permadeath");
-        rig.host.hurt_player(0, 500.0, Vec3::ZERO);
+        rig.host.hurt_player(0, 500.0, Vec3::ZERO, crate::game::player::DeathCause::Regular);
         assert!(rig.host.game_over);
         rig.run(10);
         assert!(rig.clients[0].0.game_over, "the client should see the end");

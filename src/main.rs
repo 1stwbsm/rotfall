@@ -54,6 +54,8 @@ struct Options {
     name: String,
     log: bool,
     autoplay: bool,
+    force_touch: bool,
+    export_ost: Option<String>,
 }
 
 fn start_seed() -> u64 {
@@ -85,6 +87,8 @@ fn parse_args() -> Options {
         name: "SURVIVOR".into(),
         log: std::env::var_os("ROTFALL_LOG").is_some(),
         autoplay: false,
+        force_touch: false,
+        export_ost: None,
     };
     #[cfg(not(target_arch = "wasm32"))]
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -111,6 +115,8 @@ fn parse_args() -> Options {
         match a[i].as_str() {
             "--log" => o.log = true,
             "--autoplay" => o.autoplay = true,
+            "--touch" => o.force_touch = true,
+            "--export-ost" => o.export_ost = Some(next(&mut i)),
             "--capture" => o.capture = Some(next(&mut i)),
             "--times" => o.times = next(&mut i).split(',').filter_map(|t| t.parse().ok()).collect(),
             "--wave" => o.wave = next(&mut i).parse().unwrap_or(1),
@@ -190,7 +196,7 @@ struct GameHandler {
 }
 
 /// Builds the GPU, renderer and game for a window. Shared by the desktop and the browser.
-async fn start_game(window: Arc<Window>, instance: wgpu::Instance, scale: f32, seed: u64, no_audio: bool, vsync: bool, log: bool, demo: Option<(u32, u32)>) -> Result<Running, String> {
+async fn start_game(window: Arc<Window>, instance: wgpu::Instance, scale: f32, seed: u64, no_audio: bool, vsync: bool, log: bool, demo: Option<(u32, u32)>, force_touch: bool) -> Result<Running, String> {
     let surface = instance.create_surface(window.clone()).map_err(|e| format!("could not create a drawing surface: {e}"))?;
     let gpu = Gpu::new(&instance, Some(&surface)).await.map_err(|e| {
         format!("Could not start graphics: {e}\n\nThe game needs a GPU driver with Vulkan, or OpenGL 4.3 or newer. Updating your graphics driver may help.")
@@ -206,6 +212,8 @@ async fn start_game(window: Arc<Window>, instance: wgpu::Instance, scale: f32, s
 
     let audio = if no_audio { Audio::silent() } else { Audio::start() };
     let mut app = App::new(seed, audio);
+    let (screen, touch_capable) = device_info(&window);
+    app.detect_device(screen, touch_capable, force_touch);
     // Lets the bot play in a real window, for measuring a full horde.
     if let Some((wave, scrap)) = demo {
         app.start_autoplay(wave, scrap);
@@ -287,6 +295,16 @@ fn install_desktop_entry() {
     write(data.join(format!("applications/{APP_ID}.desktop")), entry.as_bytes());
 }
 
+/// The screen's size in logical pixels. Desktop systems do not say whether they have touch.
+#[cfg(not(target_arch = "wasm32"))]
+fn device_info(window: &Window) -> ((f32, f32), bool) {
+    let screen = window.current_monitor().map_or((1920.0, 1080.0), |m| {
+        let s = m.size().to_logical::<f32>(m.scale_factor());
+        (s.width, s.height)
+    });
+    (screen, false)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn initial_size(window: &Window) -> (u32, u32) {
     let s = window.inner_size();
@@ -300,6 +318,14 @@ fn initial_size(_window: &Window) -> (u32, u32) {
     let dpr = w.device_pixel_ratio();
     let get = |v: Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>| v.ok().and_then(|x| x.as_f64()).unwrap_or(800.0);
     (((get(w.inner_width()) * dpr) as u32).clamp(1, MAX_WEB_SIZE), ((get(w.inner_height()) * dpr) as u32).clamp(1, MAX_WEB_SIZE))
+}
+
+/// The screen's size in logical pixels, and whether it reports touch.
+#[cfg(target_arch = "wasm32")]
+fn device_info(_window: &Window) -> ((f32, f32), bool) {
+    let w = web_sys::window().expect("no browser window");
+    let screen = w.screen().ok().map_or((1920.0, 1080.0), |s| (s.width().unwrap_or(1920) as f32, s.height().unwrap_or(1080) as f32));
+    (screen, w.navigator().max_touch_points() > 0)
 }
 
 /// WebGPU only promises textures this large.
@@ -327,8 +353,9 @@ impl ApplicationHandler for GameHandler {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(el.owned_display_handle())).with_env());
         let (scale, seed, no_audio, vsync, log) = (o.scale, o.seed, o.no_audio, o.vsync, o.log);
         let demo = o.autoplay.then_some((o.wave, o.scrap));
+        let force_touch = o.force_touch;
         #[cfg(not(target_arch = "wasm32"))]
-        match pollster::block_on(start_game(window, instance, scale, seed, no_audio, vsync, log, demo)) {
+        match pollster::block_on(start_game(window, instance, scale, seed, no_audio, vsync, log, demo, force_touch)) {
             Ok(r) => self.running = Some(r),
             Err(e) => fatal(&e),
         }
@@ -338,10 +365,13 @@ impl ApplicationHandler for GameHandler {
             let pending = self.pending.clone();
             // Hold big screens to about 1080p: browsers have less headroom than native code.
             let tall = initial_size(&window).1 as f32;
-            let scale = (1080.0 / tall).min(1.0) * scale;
+            // Phones have tiny screens with huge pixel counts and far less GPU to drive them.
+            let (_, touch_capable) = device_info(&window);
+            let cap = if touch_capable { 720.0 } else { 1080.0 };
+            let scale = (cap / tall).min(1.0) * scale;
             wasm_bindgen_futures::spawn_local(async move {
                 let waker = window.clone();
-                match start_game(window, instance, scale, seed, no_audio, vsync, log, demo).await {
+                match start_game(window, instance, scale, seed, no_audio, vsync, log, demo, force_touch).await {
                     Ok(r) => {
                         web_ready();
                         *pending.borrow_mut() = Some(r);
@@ -429,6 +459,15 @@ impl ApplicationHandler for GameHandler {
                     r.raw.wheel += d.signum() as i32;
                 }
             }
+            WindowEvent::Touch(t) => {
+                use game::touch::{TouchEv, TouchPhase};
+                let phase = match t.phase {
+                    winit::event::TouchPhase::Started => TouchPhase::Start,
+                    winit::event::TouchPhase::Moved => TouchPhase::Move,
+                    _ => TouchPhase::End,
+                };
+                r.raw.touches.push(TouchEv { id: t.id, phase, x: t.location.x as f32, y: t.location.y as f32 });
+            }
             WindowEvent::Focused(false) => {
                 r.raw.down.clear();
                 r.raw.lmb = false;
@@ -479,6 +518,7 @@ impl Running {
         // A lightly filtered timestep hides scheduler jitter; long stalls are clamped.
         self.smooth_dt += (real_dt.min(0.05) - self.smooth_dt) * 0.25;
         let size = (self.config.width, self.config.height);
+        self.app.begin_frame(&mut self.raw, size);
         let t0 = Instant::now();
         self.app.update(self.smooth_dt, &self.raw, size);
         let t1 = Instant::now();
@@ -549,6 +589,9 @@ fn run_capture(o: &Options) {
         "menu_records" => Some(Page::Records),
         "menu_options" => Some(Page::Options),
         "menu_manual" => Some(Page::Manual),
+        "menu_extras" => Some(Page::Extras),
+        "menu_gallery" => Some(Page::Gallery),
+        "menu_ost" => Some(Page::Soundtrack),
         _ => None,
     };
     let mut scripted_client = false;
@@ -596,6 +639,31 @@ fn run_capture(o: &Options) {
             app.autoplay = true;
         }
         "armory" => app.armory_open = true,
+        "touch" => {
+            app.autoplay = false;
+            app.touch.enabled = true;
+        }
+        "touch_prompt" => {
+            app.detect_device((390.0, 844.0), true, false);
+        }
+        "dead_rot" | "dead_zombie" | "dead_blast" => {
+            use game::player::DeathCause as C;
+            app.autoplay = false;
+            let cause = match o.screen.as_str() {
+                "dead_rot" => C::Regular,
+                "dead_zombie" => C::Zombie,
+                _ => C::Explosion,
+            };
+            app.world.invincible = false;
+            let local = app.world.local;
+            app.world.hurt_player(local, 1000.0, glam::Vec3::X, cause);
+        }
+        "knocked" => {
+            app.autoplay = false;
+            app.world.invincible = false;
+            let at = app.world.me().pos + glam::Vec3::X;
+            app.world.explosions.push(game::combat::Explosion { pos: at, radius: 7.0, damage: 40.0, from_enemy: false, force: 22.0, spares_players: false, barrel: false });
+        }
         "help" => app.help_open = true,
         "pause" => {
             app.autoplay = false;
@@ -609,7 +677,7 @@ fn run_capture(o: &Options) {
             app.world.stats.wave_reached = 11;
             app.world.stats.kills = 1873;
             let local = app.world.local;
-            app.world.hurt_player(local, 1000.0, glam::Vec3::ZERO);
+            app.world.hurt_player(local, 1000.0, glam::Vec3::ZERO, game::player::DeathCause::Explosion);
         }
         _ => {}
     }
@@ -847,6 +915,10 @@ fn main() {
         };
         audio::render_track_wav(track, *secs, *inten, out).expect("failed to write wav");
         println!("wrote {out}");
+        return;
+    }
+    if let Some(dir) = &o.export_ost {
+        audio::export_soundtrack(dir).expect("failed to write the soundtrack");
         return;
     }
     if o.server {

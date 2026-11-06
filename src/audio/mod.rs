@@ -90,6 +90,18 @@ impl Mixer {
         }
     }
 
+    /// A mixer for rendering music alone, without the cost of making the sound effects.
+    pub fn music_only(track: Track) -> Self {
+        Mixer {
+            bank: Vec::new(),
+            voices: Vec::new(),
+            music: music::Music::new(track),
+            sfx_volume: 0.0,
+            env: 1.0,
+            peak: 0.0,
+        }
+    }
+
     /// Render interleaved stereo; output is limited to [-1, 1].
     pub fn render(&mut self, out: &mut [f32]) {
         out.iter_mut().for_each(|s| *s = 0.0);
@@ -205,7 +217,7 @@ fn web_audio(rx: Receiver<Cmd>) -> Result<(), wasm_bindgen::JsValue> {
     let unlock = Closure::<dyn FnMut()>::new(move || {
         let _ = ctx.resume();
     });
-    for kind in ["pointerdown", "keydown"] {
+    for kind in ["pointerdown", "keydown", "touchend"] {
         target.add_event_listener_with_callback(kind, unlock.as_ref().unchecked_ref())?;
     }
     unlock.forget();
@@ -241,19 +253,65 @@ fn audio_thread(rx: Receiver<Cmd>) {
     }
 }
 
-/// Offline rendering of the score; used by `--render-music` and the tests.
-pub fn render_track_wav(track: Track, seconds: f32, intensity: f32, path: &str) -> std::io::Result<()> {
-    let mut m = Mixer::new(track);
-    m.music.set_intensity(intensity);
-    m.music.intensity = intensity;
-    let n = (seconds * SR) as usize * 2;
-    let mut buf = vec![0.0f32; n];
-    for c in buf.chunks_mut(1024) {
-        m.render(c);
+/// Renders one soundtrack file a slice at a time, so that the game stays responsive even in a
+/// browser, where there are no threads to hide it on.
+pub struct OstRender {
+    pub track: Track,
+    mixer: Mixer,
+    pcm: Vec<i16>,
+    frames: usize,
+    done: usize,
+}
+
+const OST_FADE_SECONDS: f32 = 2.5;
+
+impl OstRender {
+    pub fn new(track: Track) -> Self {
+        let mut mixer = Mixer::music_only(track);
+        mixer.music.set_intensity(1.0);
+        mixer.music.intensity = 1.0;
+        mixer.music.volume = 1.0;
+        // One full pass, plus room for the last notes to ring out as it fades.
+        let frames = ((track.loop_seconds() + OST_FADE_SECONDS) * SR) as usize;
+        OstRender { track, mixer, pcm: Vec::with_capacity(frames * 2), frames, done: 0 }
     }
-    let mut out = Vec::with_capacity(44 + n * 2);
+
+    pub fn progress(&self) -> f32 {
+        self.done as f32 / self.frames.max(1) as f32
+    }
+
+    /// Renders up to `frames` more frames. Returns true when the track is complete.
+    pub fn advance(&mut self, frames: usize) -> bool {
+        let n = frames.min(self.frames - self.done);
+        let mut buf = vec![0.0f32; n * 2];
+        self.mixer.render(&mut buf);
+        let fade_from = self.frames - (OST_FADE_SECONDS * SR) as usize;
+        for (i, f) in buf.chunks_exact(2).enumerate() {
+            let at = self.done + i;
+            let k = if at > fade_from { 1.0 - (at - fade_from) as f32 / (self.frames - fade_from) as f32 } else { 1.0 };
+            self.pcm.push((f[0].clamp(-1.0, 1.0) * k * 32767.0) as i16);
+            self.pcm.push((f[1].clamp(-1.0, 1.0) * k * 32767.0) as i16);
+        }
+        self.done += n;
+        self.done >= self.frames
+    }
+
+    pub fn file_name(&self) -> String {
+        let n = Track::ALL.iter().position(|t| *t == self.track).unwrap_or(0) + 1;
+        let clean: String = self.track.name().chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect();
+        format!("{n:02} {clean}.wav")
+    }
+
+    pub fn wav(&self) -> Vec<u8> {
+        encode_wav(&self.pcm)
+    }
+}
+
+fn encode_wav(pcm: &[i16]) -> Vec<u8> {
+    let n = pcm.len() * 2;
+    let mut out = Vec::with_capacity(44 + n);
     out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&((36 + n * 2) as u32).to_le_bytes());
+    out.extend_from_slice(&((36 + n) as u32).to_le_bytes());
     out.extend_from_slice(b"WAVEfmt ");
     out.extend_from_slice(&16u32.to_le_bytes());
     out.extend_from_slice(&1u16.to_le_bytes());
@@ -263,11 +321,38 @@ pub fn render_track_wav(track: Track, seconds: f32, intensity: f32, path: &str) 
     out.extend_from_slice(&4u16.to_le_bytes());
     out.extend_from_slice(&16u16.to_le_bytes());
     out.extend_from_slice(b"data");
-    out.extend_from_slice(&((n * 2) as u32).to_le_bytes());
-    for s in buf {
-        out.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+    out.extend_from_slice(&(n as u32).to_le_bytes());
+    for s in pcm {
+        out.extend_from_slice(&s.to_le_bytes());
     }
-    std::fs::write(path, out)
+    out
+}
+
+/// Offline rendering of the score; used by `--render-music`.
+pub fn render_track_wav(track: Track, seconds: f32, intensity: f32, path: &str) -> std::io::Result<()> {
+    let mut m = Mixer::music_only(track);
+    m.music.set_intensity(intensity);
+    m.music.intensity = intensity;
+    let n = (seconds * SR) as usize * 2;
+    let mut buf = vec![0.0f32; n];
+    for c in buf.chunks_mut(1024) {
+        m.render(c);
+    }
+    let pcm: Vec<i16> = buf.iter().map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
+    std::fs::write(path, encode_wav(&pcm))
+}
+
+/// Writes the whole soundtrack to a folder.
+pub fn export_soundtrack(dir: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for t in Track::ALL {
+        let mut r = OstRender::new(t);
+        while !r.advance(44100) {}
+        let path = std::path::Path::new(dir).join(r.file_name());
+        std::fs::write(&path, r.wav())?;
+        println!("{} ({:.0} s)", path.display(), t.loop_seconds());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -275,11 +360,47 @@ mod tests {
     use super::music::*;
     use super::*;
 
-    const TRACKS: [Track; 7] =
-        [Track::Menu, Track::Build, Track::CombatA, Track::CombatB, Track::CombatC, Track::Boss, Track::GameOver];
+    const TRACKS: [Track; 11] = Track::ALL;
 
     fn rms(b: &[f32]) -> f32 {
         (b.iter().map(|x| x * x).sum::<f32>() / b.len().max(1) as f32).sqrt()
+    }
+
+    #[test]
+    fn track_names_are_unique_and_loops_have_length() {
+        let names: std::collections::HashSet<_> = Track::ALL.iter().map(|t| t.name()).collect();
+        assert_eq!(names.len(), Track::ALL.len());
+        assert_eq!(Track::Build.name(), "Daytime Escape");
+        assert_eq!(Track::Menu.name(), "Descent");
+        for t in Track::ALL {
+            let secs = t.loop_seconds();
+            assert!((8.0..300.0).contains(&secs), "{t:?} loops every {secs} s");
+        }
+    }
+
+    #[test]
+    fn soundtrack_files_are_valid_and_audible() {
+        for t in [Track::Rot, Track::RestWell] {
+            let mut r = OstRender::new(t);
+            let mut steps = 0;
+            while !r.advance(8192) {
+                steps += 1;
+                assert!(steps < 10_000);
+            }
+            assert!((r.progress() - 1.0).abs() < 1e-6);
+            let wav = r.wav();
+            assert_eq!(&wav[..4], b"RIFF");
+            assert_eq!(&wav[8..12], b"WAVE");
+            let expected = ((t.loop_seconds() + OST_FADE_SECONDS) * SR) as usize * 4;
+            assert_eq!(wav.len(), 44 + expected, "{t:?}");
+            let peak = wav[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]).unsigned_abs()).max().unwrap();
+            assert!(peak > 1500, "{t:?} is nearly silent: {peak}");
+            // It fades out rather than cutting off.
+            let tail = &wav[wav.len() - 400..];
+            let end = tail.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]).unsigned_abs()).max().unwrap();
+            assert!(end < 400, "{t:?} ends abruptly: {end}");
+        }
+        assert_eq!(OstRender::new(Track::RestWell).file_name(), "11 Rest Well for It Is Over.wav");
     }
 
     #[test]
