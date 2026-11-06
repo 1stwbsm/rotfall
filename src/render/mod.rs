@@ -1454,7 +1454,7 @@ impl Renderer {
 }
 
 /// Decodes an embedded PNG into RGBA8.
-fn decode_png(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+pub fn decode_png(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
     let mut dec = png::Decoder::new(std::io::Cursor::new(bytes));
     dec.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = dec.read_info().expect("embedded PNG is invalid");

@@ -2,6 +2,8 @@
 
     blender -b -P tools/menu_scene.py -- scene  OUT.png WIDTH HEIGHT SAMPLES
     blender -b -P tools/menu_scene.py -- logo   OUT.png WIDTH HEIGHT SAMPLES FONT.ttf
+    blender -b -P tools/menu_scene.py -- thumb  OUT.png WIDTH HEIGHT SAMPLES FONT.ttf
+    blender -b -P tools/menu_scene.py -- icon   OUT.png WIDTH HEIGHT SAMPLES FONT.ttf
 """
 import math
 import random
@@ -124,15 +126,10 @@ def aim(ob, target):
 
 
 # ------------------------------------------------------------------ logo
-if MODE == "logo":
-    scene.render.film_transparent = True
-    scene.view_settings.look = "AgX - High Contrast"
-    world = bpy.data.worlds.new("w")
-    world.use_nodes = True
-    world.node_tree.nodes["Background"].inputs[0].default_value = (0.03, 0.04, 0.05, 1)
-    scene.world = world
+def rust_text(text, voxel=0.0045, dent=0.024):
+    """Extruded lettering in pitted, rusted steel. Returns the mesh object, centered on the origin."""
     txt = bpy.data.curves.new("t", "FONT")
-    txt.body = "ROTFALL"
+    txt.body = text
     if FONT:
         txt.font = bpy.data.fonts.load(FONT)
     txt.extrude = 0.11
@@ -143,7 +140,6 @@ if MODE == "logo":
     txt.space_character = 1.05
     ob = bpy.data.objects.new("t", txt)
     scene.collection.objects.link(ob)
-    ob.rotation_euler = (math.radians(90), 0, 0)
     bpy.context.view_layer.objects.active = ob
     ob.select_set(True)
     bpy.ops.object.convert(target="MESH")
@@ -151,22 +147,33 @@ if MODE == "logo":
     # Rust and blood eat into plate steel; the noise also dents the geometry.
     m = noisy("rust", (0.09, 0.03, 0.012), (0.56, 0.47, 0.36), scale=5.0, rough=(0.3, 0.85), metal=0.85, bump=0.8)
     ob.data.materials.append(m)
-    # Subdivide so the displacement has something to work with, then chew the surface.
     bpy.ops.object.mode_set(mode="EDIT")
     bpy.ops.mesh.select_all(action="SELECT")
     bpy.ops.mesh.quads_convert_to_tris()
     bpy.ops.object.mode_set(mode="OBJECT")
     rem = ob.modifiers.new("r", "REMESH")
     rem.mode = "VOXEL"
-    rem.voxel_size = 0.0045
+    rem.voxel_size = voxel
     tex = bpy.data.textures.new("n", "CLOUDS")
     tex.noise_scale = 0.09
     tex.noise_depth = 4
     dis = ob.modifiers.new("d", "DISPLACE")
     dis.texture = tex
-    dis.strength = 0.024
+    dis.strength = dent
     for poly in ob.data.polygons:
         poly.use_smooth = True
+    return ob
+
+
+if MODE == "logo":
+    scene.render.film_transparent = True
+    scene.view_settings.look = "AgX - High Contrast"
+    world = bpy.data.worlds.new("w")
+    world.use_nodes = True
+    world.node_tree.nodes["Background"].inputs[0].default_value = (0.03, 0.04, 0.05, 1)
+    scene.world = world
+    ob = rust_text("ROTFALL")
+    ob.rotation_euler = (math.radians(90), 0, 0)
     cam = bpy.data.cameras.new("c")
     cam.lens = 70
     camo = bpy.data.objects.new("c", cam)
@@ -179,6 +186,43 @@ if MODE == "logo":
     aim(light("AREA", (-3, -3, 3), 260, (1.0, 0.72, 0.42), size=3), (0, 0, 0))
     aim(light("AREA", (3.5, -2.2, -1.2), 60, (0.2, 0.85, 1.0), size=3), (0, 0, 0))
     aim(light("AREA", (0, 2.5, 2.5), 420, (1.0, 0.14, 0.05), size=4), (0, 0, 0))
+    bpy.ops.render.render(write_still=True)
+    sys.exit(0)
+
+# ------------------------------------------------------------------ app icon
+if MODE == "icon":
+    # One bold letter in front of the reactor's glow: the only thing that survives 16 pixels.
+    scene.render.film_transparent = True
+    scene.view_settings.look = "AgX - Very High Contrast"
+    scene.view_settings.exposure = 0.0
+    world = bpy.data.worlds.new("w")
+    world.use_nodes = True
+    world.node_tree.nodes["Background"].inputs[0].default_value = (0.02, 0.03, 0.04, 1)
+    scene.world = world
+    ob = rust_text("R", voxel=0.006, dent=0.012)
+    ob.rotation_euler = (math.radians(90), 0, 0)
+    h = ob.dimensions.y
+    k = 1.0 / h
+    ob.scale = (k, k, k)
+    # Dark steel tile with softened corners, and a glowing disc behind the letter.
+    bm = bmesh.new()
+    box(bm, (0, 0.22, 0), (1.5, 0.12, 1.5))
+    tile = from_bm("tile", bm, material("tile", (0.012, 0.02, 0.028), 0.45, 0.7))
+    tile.modifiers.new("b", "BEVEL").width = 0.26
+    tile.modifiers["b"].segments = 8
+    bm = bmesh.new()
+    cyl(bm, (0, 0.15, 0), (0, 0.14, 0), 0.62, 0.62, 48)
+    from_bm("glow", bm, material("glow", (0, 0, 0), 0.5, emit=(0.02, 0.42, 1.0), strength=0.62))
+    cam = bpy.data.cameras.new("c")
+    cam.type = "ORTHO"
+    cam.ortho_scale = 1.56
+    camo = bpy.data.objects.new("c", cam)
+    scene.collection.objects.link(camo)
+    scene.camera = camo
+    camo.location = (0, -6, 0)
+    aim(camo, (0, 0, 0))
+    aim(light("AREA", (-2, -3, 2.5), 90, (1.0, 0.78, 0.5), size=2.5), (0, 0, 0))
+    aim(light("AREA", (2, -2, -1.5), 26, (1.0, 0.25, 0.08), size=2), (0, 0, 0))
     bpy.ops.render.render(write_still=True)
     sys.exit(0)
 
@@ -535,6 +579,9 @@ eye_me.materials.append(eye)
 
 
 def zombie(x, y, scale=1.0, face_jitter=0.5):
+    # The thumbnail camera stands further up the street: nobody should block its lens.
+    if MODE == "thumb" and y < 12.5:
+        return
     me, head = R.choice(variants)
     ob = bpy.data.objects.new("z", me)
     scene.collection.objects.link(ob)
@@ -649,6 +696,32 @@ scene.camera = cam_ob
 cam_ob.location = (-2.2, -1.4, 1.25)
 aim(cam_ob, (-3.2, 40, 6.0))
 cam_ob.rotation_euler.rotate_axis("Z", math.radians(-1.6))
+
+if MODE == "thumb":
+    # A tighter, centered framing: reactor and horde behind, the logo in the middle of the shot.
+    square = W == H
+    cam.dof.use_dof = False
+    cam.lens = 24 if square else 30
+    # Past the barricade, with the horde close enough to loom under the logo.
+    cam_ob.location = (1.4, 9.7, 1.2 if square else 1.3)
+    # The square frame has spare height, so tilt down and let the reactor fill the space above the logo.
+    aim(cam_ob, (2.6, 70, 7.5 if square else 9.5))
+    # Bright streaks would slash across the lettering.
+    for ob in bpy.data.objects:
+        if ob.name.startswith(("flash", "tracer")):
+            ob.hide_render = True
+    # The logo rides in front of the lens, as real geometry lit by real lights.
+    logo = rust_text("ROTFALL")
+    logo.parent = cam_ob
+    dist = 3.0
+    frame = 2.0 * dist * 18.0 / cam.lens
+    k = frame * (0.88 if square else 0.8) / logo.dimensions.x
+    logo.scale = (k, k, k)
+    logo.location = (0, 0 if not square else 0.0, -dist)
+    for pos, power, colour, size in (((-1.2, 1.0, -1.2), 75, (1.0, 0.72, 0.42), 1.5), ((1.3, -0.8, -1.5), 14, (0.2, 0.85, 1.0), 1.2), ((0, 1.2, -4.2), 90, (1.0, 0.14, 0.05), 2.0)):
+        l = light("AREA", pos, power, colour, size=size)
+        l.parent = cam_ob
+        l.rotation_euler = (Vector((0, 0, -dist)) - Vector(pos)).to_track_quat("-Z", "Y").to_euler()
 
 scene.cycles.volume_step_rate = 4.0
 bpy.ops.render.render(write_still=True)

@@ -229,6 +229,64 @@ async fn start_game(window: Arc<Window>, instance: wgpu::Instance, scale: f32, s
     })
 }
 
+/// The icon as pixel data, which is how Windows and X11 receive it.
+#[cfg(not(target_arch = "wasm32"))]
+fn window_icon() -> Option<winit::window::Icon> {
+    let (w, h, rgba) = render::decode_png(include_bytes!("../assets/icon_80x80.png"));
+    winit::window::Icon::from_rgba(rgba, w, h).ok()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn window_attributes() -> winit::window::WindowAttributes {
+    let attrs = Window::default_attributes().with_title("ROTFALL").with_inner_size(PhysicalSize::new(1600, 900)).with_window_icon(window_icon());
+    // Windows keeps two icons: the one above is the title bar's, this one the taskbar's.
+    #[cfg(windows)]
+    let attrs = {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        attrs.with_taskbar_icon(window_icon())
+    };
+    // Wayland has no window icons at all. The compositor finds one through the app ID.
+    #[cfg(target_os = "linux")]
+    let attrs = {
+        use winit::platform::wayland::WindowAttributesExtWayland;
+        use winit::platform::x11::WindowAttributesExtX11;
+        let attrs = WindowAttributesExtWayland::with_name(attrs, APP_ID, APP_ID);
+        WindowAttributesExtX11::with_name(attrs, APP_ID, APP_ID)
+    };
+    attrs
+}
+
+#[cfg(target_os = "linux")]
+const APP_ID: &str = "rotfall";
+
+/// Linux desktops look up a running app's icon through a desktop entry, so one has to exist.
+/// `NoDisplay` keeps it out of the application menu: this only teaches the desktop the icon.
+#[cfg(target_os = "linux")]
+fn install_desktop_entry() {
+    let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(std::path::PathBuf::from).or_else(|| {
+        std::env::var_os("HOME").filter(|v| !v.is_empty()).map(|h| std::path::PathBuf::from(h).join(".local/share"))
+    }) else {
+        return;
+    };
+    let Ok(exe) = std::env::current_exe() else { return };
+    // Quoted as the desktop entry format asks, since the game may live under a path with spaces.
+    let exec = exe.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    let entry = format!(
+        "[Desktop Entry]\nType=Application\nName=ROTFALL\nComment=Top-down zombie wave shooter\nExec=\"{exec}\"\nIcon={APP_ID}\nStartupWMClass={APP_ID}\nCategories=Game;ActionGame;\nNoDisplay=true\n"
+    );
+    let write = |path: std::path::PathBuf, bytes: &[u8]| {
+        if std::fs::read(&path).is_ok_and(|old| old == bytes) {
+            return;
+        }
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&path, bytes);
+    };
+    write(data.join("icons/hicolor/256x256/apps/rotfall.png"), include_bytes!("../assets/icon_256.png"));
+    write(data.join(format!("applications/{APP_ID}.desktop")), entry.as_bytes());
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn initial_size(window: &Window) -> (u32, u32) {
     let s = window.inner_size();
@@ -255,7 +313,7 @@ impl ApplicationHandler for GameHandler {
         }
         let o = &self.options;
         #[cfg(not(target_arch = "wasm32"))]
-        let attrs = Window::default_attributes().with_title("ROTFALL").with_inner_size(PhysicalSize::new(1600, 900));
+        let attrs = window_attributes();
         #[cfg(target_arch = "wasm32")]
         let attrs = {
             use winit::platform::web::WindowAttributesExtWebSys;
@@ -803,6 +861,8 @@ fn main() {
         run_bench(&o);
         return;
     }
+    #[cfg(target_os = "linux")]
+    install_desktop_entry();
     let el = EventLoop::new().expect("event loop");
     let mut h = GameHandler {
         options: o,

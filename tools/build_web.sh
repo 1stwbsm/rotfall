@@ -24,7 +24,8 @@ wasm = open(out + "/rotfall_bg.wasm", "rb").read()
 if "</script" in glue:
     sys.exit("the generated JavaScript would end its script tag early")
 packed = base64.b64encode(gzip.compress(wasm, 9, mtime=0)).decode()
-page = page.replace("/*GLUE*/", glue).replace("/*WASM*/", packed)
+icon = base64.b64encode(open("assets/icon_80x80.png", "rb").read()).decode()
+page = page.replace("/*ICON*/", icon).replace("/*GLUE*/", glue).replace("/*WASM*/", packed)
 open(dest, "w").write(page)
 print("%s: %.1f MB (WebAssembly %.1f MB before compression)" % (dest, len(page) / 1e6, len(wasm) / 1e6))
 PY

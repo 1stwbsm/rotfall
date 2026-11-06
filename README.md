@@ -118,7 +118,7 @@ Things to know about the network design:
 | `src/ragdoll.rs` | **Custom ragdoll engine.** Position-based dynamics on a 16-joint skeleton, with joint limits, torso bracing, breakable limbs, partial bodies, static collision, pile-ups and sleeping. Living characters are posed on the same skeleton, so death hands over with no visible pop. |
 | `src/audio/` | **Soundtrack and SFX.** Seven original tracks written as note data and synthesized live, with layers that follow the battle's intensity. All effects are synthesized at startup. Output goes through a small runtime-loaded ALSA binding. |
 | `src/game/` | Simulation: flow-field navigation, zombie AI, combat, base building, waves, HUD, and a bot that plays the game. `net.rs` is the co-op protocol and `save.rs` the save format. |
-| `tools/menu_scene.py` | **Menu art.** A Blender scene built entirely from script. `tools/render_menu_art.sh` re-renders it to `assets/`, which are compiled into the game. |
+| `tools/menu_scene.py` | **Art.** A Blender scene built entirely from script: the menu background and logo, the thumbnails in `assets/`, and the icon. `tools/render_menu_art.sh` re-renders them all. |
 
 Dependencies are limited to `wgpu`, `winit`, `glam`, `bytemuck`, `pollster`, `libc` and `png`.
 
@@ -144,6 +144,10 @@ validators, so problems there are possible and worth reporting.
 A Windows build comes from `tools/build_windows.sh`, run on Linux with `zig` and the `rustup` target
 `x86_64-pc-windows-gnu`. It produces `dist/rotfall-windows-x64.zip`. The `.exe` is unsigned, so
 SmartScreen warns on first launch. Saves go to `%APPDATA%\rotfall`, along with a `crash.log` after a crash.
+
+On Linux, the game writes a hidden desktop entry and an icon on launch, because that is the only way a
+Wayland desktop can show a window's icon. Delete `~/.local/share/applications/rotfall.desktop` and
+`~/.local/share/icons/hicolor/256x256/apps/rotfall.png` to remove them.
 
 Linux builds come from `tools/build_linux.sh`. The binary needs glibc 2.39 or newer, as it links against
 this machine's system libraries; on an older distribution, build from source.

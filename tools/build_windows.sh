@@ -24,7 +24,8 @@ for a in "$@"; do
     *) args="$args '$(printf %s "$a" | sed "s/'/'\\\\''/g")'" ;;
   esac
 done
-eval exec zig cc -target x86_64-windows-gnu "$args"
+# The icon resource built below, which is what Explorer and pinned shortcuts show.
+eval exec zig cc -target x86_64-windows-gnu "$args" "'$(dirname "$0")/rotfall.res'"
 SH
 # Rust's runtime and zig's both define ___chkstk_ms, and zig offers no way to tolerate that. Both are
 # the same stack probe, so a private copy of Rust's library gets its definition renamed out of the
@@ -40,6 +41,7 @@ if b"___chkstk_ms" not in data:
     sys.exit("___chkstk_ms not found: this workaround may no longer be needed")
 open(out, "wb").write(data.replace(b"___chkstk_ms", b"___chkstk_rs"))
 PY
+zig rc /nologo tools/windows/rotfall.rc "$WRAP/rotfall.res"
 printf '#!/bin/sh\nexec zig dlltool "$@"\n' > "$WRAP/dlltool"
 printf '#!/bin/sh\nexec zig ar "$@"\n' > "$WRAP/ar"
 chmod +x "$WRAP"/*
