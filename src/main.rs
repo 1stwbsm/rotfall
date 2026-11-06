@@ -1,10 +1,13 @@
 //! ROTFALL: a top-down wave-survival zombie shooter.
 // On Windows, double-clicking the game should not open a console window behind it.
 #![cfg_attr(windows, windows_subsystem = "windows")]
+// The browser build leaves out the command-line tools and the server.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code, unused))]
 mod audio;
 mod game;
 mod ragdoll;
 mod render;
+mod storage;
 mod util;
 mod wire;
 
@@ -13,15 +16,22 @@ use game::app::{Action, App, RawInput};
 use game::net::ServerConfig;
 use render::{FrameData, Gpu, Renderer};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::PhysicalKey;
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
+// The ground is painted on the CPU when a map starts, single-threaded in a browser.
+#[cfg(not(target_arch = "wasm32"))]
 const GROUND_TEX: u32 = 2048;
+#[cfg(target_arch = "wasm32")]
+const GROUND_TEX: u32 = 1024;
 
 struct Options {
     capture: Option<String>,
@@ -42,6 +52,15 @@ struct Options {
     connect: Option<String>,
     host_capture: bool,
     name: String,
+    log: bool,
+    autoplay: bool,
+}
+
+fn start_seed() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    return js_sys::Date::now() as u64;
+    #[cfg(not(target_arch = "wasm32"))]
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1)
 }
 
 fn parse_args() -> Options {
@@ -55,7 +74,7 @@ fn parse_args() -> Options {
         scale: 1.0,
         render_music: None,
         screen: "play".into(),
-        seed: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(1),
+        seed: start_seed(),
         no_audio: false,
         vsync: true,
         server: false,
@@ -64,8 +83,25 @@ fn parse_args() -> Options {
         connect: None,
         host_capture: false,
         name: "SURVIVOR".into(),
+        log: std::env::var_os("ROTFALL_LOG").is_some(),
+        autoplay: false,
     };
+    #[cfg(not(target_arch = "wasm32"))]
     let a: Vec<String> = std::env::args().skip(1).collect();
+    // A page has no command line, so its URL takes the same options: ?no-audio&scale=0.7
+    #[cfg(target_arch = "wasm32")]
+    let a: Vec<String> = web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .unwrap_or_default()
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|p| !p.is_empty())
+        .flat_map(|p| {
+            let mut kv = p.splitn(2, '=');
+            let k = format!("--{}", kv.next().unwrap_or(""));
+            std::iter::once(k).chain(kv.next().map(str::to_string))
+        })
+        .collect();
     let mut i = 0;
     let next = |i: &mut usize| -> String {
         *i += 1;
@@ -73,6 +109,8 @@ fn parse_args() -> Options {
     };
     while i < a.len() {
         match a[i].as_str() {
+            "--log" => o.log = true,
+            "--autoplay" => o.autoplay = true,
             "--capture" => o.capture = Some(next(&mut i)),
             "--times" => o.times = next(&mut i).split(',').filter_map(|t| t.parse().ok()).collect(),
             "--wave" => o.wave = next(&mut i).parse().unwrap_or(1),
@@ -137,59 +175,131 @@ struct Running {
     smooth_dt: f32,
     fps_acc: f32,
     fps_frames: u32,
+    log: bool,
+    /// Milliseconds spent since the last log line: simulating, building the frame, submitting it.
+    cpu: [f32; 3],
 }
 
 struct GameHandler {
     options: Options,
     running: Option<Running>,
+    /// The window while its renderer is being set up, which is asynchronous in a browser.
+    window: Option<Arc<Window>>,
+    #[cfg(target_arch = "wasm32")]
+    pending: std::rc::Rc<std::cell::RefCell<Option<Running>>>,
 }
+
+/// Builds the GPU, renderer and game for a window. Shared by the desktop and the browser.
+async fn start_game(window: Arc<Window>, instance: wgpu::Instance, scale: f32, seed: u64, no_audio: bool, vsync: bool, log: bool, demo: Option<(u32, u32)>) -> Result<Running, String> {
+    let surface = instance.create_surface(window.clone()).map_err(|e| format!("could not create a drawing surface: {e}"))?;
+    let gpu = Gpu::new(&instance, Some(&surface)).await.map_err(|e| {
+        format!("Could not start graphics: {e}\n\nThe game needs a GPU driver with Vulkan, or OpenGL 4.3 or newer. Updating your graphics driver may help.")
+    })?;
+    let size = initial_size(&window);
+    let caps = surface.get_capabilities(&gpu.adapter);
+    let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
+    let present_mode = if vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
+    let mut config = surface.get_default_config(&gpu.adapter, size.0, size.1).ok_or("the drawing surface is not supported")?;
+    config.format = format;
+    config.present_mode = present_mode;
+    surface.configure(&gpu.device, &config);
+
+    let audio = if no_audio { Audio::silent() } else { Audio::start() };
+    let mut app = App::new(seed, audio);
+    // Lets the bot play in a real window, for measuring a full horde.
+    if let Some((wave, scrap)) = demo {
+        app.start_autoplay(wave, scrap);
+    }
+    let ground = app.world.map.bake_ground(GROUND_TEX);
+    let renderer = Renderer::new(gpu, format, (config.width, config.height), scale, game::map::HALF, (&ground, GROUND_TEX));
+    Ok(Running {
+        window,
+        surface,
+        config,
+        renderer,
+        frame: FrameData::new(),
+        app,
+        raw: RawInput::default(),
+        last: Instant::now(),
+        smooth_dt: 1.0 / 60.0,
+        fps_acc: 0.0,
+        fps_frames: 0,
+        log,
+        cpu: [0.0; 3],
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn initial_size(window: &Window) -> (u32, u32) {
+    let s = window.inner_size();
+    (s.width.max(1), s.height.max(1))
+}
+
+/// A canvas has no size until layout has run, so ask the browser about the page instead.
+#[cfg(target_arch = "wasm32")]
+fn initial_size(_window: &Window) -> (u32, u32) {
+    let w = web_sys::window().expect("no browser window");
+    let dpr = w.device_pixel_ratio();
+    let get = |v: Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue>| v.ok().and_then(|x| x.as_f64()).unwrap_or(800.0);
+    (((get(w.inner_width()) * dpr) as u32).clamp(1, MAX_WEB_SIZE), ((get(w.inner_height()) * dpr) as u32).clamp(1, MAX_WEB_SIZE))
+}
+
+/// WebGPU only promises textures this large.
+#[cfg(target_arch = "wasm32")]
+const MAX_WEB_SIZE: u32 = 8192;
 
 impl ApplicationHandler for GameHandler {
     fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.running.is_some() {
+        if self.running.is_some() || self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("ROTFALL")
-            .with_inner_size(PhysicalSize::new(1600, 900));
+        let o = &self.options;
+        #[cfg(not(target_arch = "wasm32"))]
+        let attrs = Window::default_attributes().with_title("ROTFALL").with_inner_size(PhysicalSize::new(1600, 900));
+        #[cfg(target_arch = "wasm32")]
+        let attrs = {
+            use winit::platform::web::WindowAttributesExtWebSys;
+            Window::default_attributes().with_title("ROTFALL").with_append(true)
+        };
         let window = Arc::new(el.create_window(attrs).expect("window creation failed"));
         window.set_cursor_visible(false);
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(el.owned_display_handle())).with_env());
-        let surface = instance.create_surface(window.clone()).expect("surface creation failed");
-        let gpu = pollster::block_on(Gpu::new(&instance, Some(&surface))).unwrap_or_else(|e| {
-            fatal(&format!("Could not start graphics: {e}\n\nThe game needs a GPU driver with Vulkan, or OpenGL 4.3 or newer. Updating your graphics driver may help."))
-        });
-        let size = window.inner_size();
-        let caps = surface.get_capabilities(&gpu.adapter);
-        let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
-        let present_mode = if self.options.vsync {
-            wgpu::PresentMode::AutoVsync
-        } else {
-            wgpu::PresentMode::AutoNoVsync
-        };
-        let mut config = surface.get_default_config(&gpu.adapter, size.width.max(1), size.height.max(1)).expect("surface unsupported");
-        config.format = format;
-        config.present_mode = present_mode;
-        surface.configure(&gpu.device, &config);
-
-        let audio = if self.options.no_audio { Audio::silent() } else { Audio::start() };
-        let app = App::new(self.options.seed, audio);
-        let ground = app.world.map.bake_ground(GROUND_TEX);
-        let renderer = Renderer::new(gpu, format, (config.width, config.height), self.options.scale, game::map::HALF, (&ground, GROUND_TEX));
-        self.running = Some(Running {
-            window,
-            surface,
-            config,
-            renderer,
-            frame: FrameData::new(),
-            app,
-            raw: RawInput::default(),
-            last: Instant::now(),
-            smooth_dt: 1.0 / 60.0,
-            fps_acc: 0.0,
-            fps_frames: 0,
-        });
+        // A browser paces frames itself; polling would just spin its main thread between them.
+        #[cfg(not(target_arch = "wasm32"))]
         el.set_control_flow(ControlFlow::Poll);
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(el.owned_display_handle())).with_env());
+        let (scale, seed, no_audio, vsync, log) = (o.scale, o.seed, o.no_audio, o.vsync, o.log);
+        let demo = o.autoplay.then_some((o.wave, o.scrap));
+        #[cfg(not(target_arch = "wasm32"))]
+        match pollster::block_on(start_game(window, instance, scale, seed, no_audio, vsync, log, demo)) {
+            Ok(r) => self.running = Some(r),
+            Err(e) => fatal(&e),
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.window = Some(window.clone());
+            let pending = self.pending.clone();
+            // Hold big screens to about 1080p: browsers have less headroom than native code.
+            let tall = initial_size(&window).1 as f32;
+            let scale = (1080.0 / tall).min(1.0) * scale;
+            wasm_bindgen_futures::spawn_local(async move {
+                let waker = window.clone();
+                match start_game(window, instance, scale, seed, no_audio, vsync, log, demo).await {
+                    Ok(r) => {
+                        web_ready();
+                        *pending.borrow_mut() = Some(r);
+                        waker.request_redraw();
+                    }
+                    Err(e) => fatal(&e),
+                }
+            });
+        }
+    }
+
+    /// A browser tab closing or going away: the last chance to keep the run.
+    fn suspended(&mut self, _el: &ActiveEventLoop) {
+        if let Some(r) = self.running.as_mut() {
+            r.app.shutdown();
+        }
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -201,6 +311,8 @@ impl ApplicationHandler for GameHandler {
             }
             WindowEvent::Resized(s) => {
                 if s.width > 0 && s.height > 0 {
+                    #[cfg(target_arch = "wasm32")]
+                    let s = PhysicalSize::new(s.width.min(MAX_WEB_SIZE), s.height.min(MAX_WEB_SIZE));
                     r.config.width = s.width;
                     r.config.height = s.height;
                     r.surface.configure(&r.renderer.gpu.device, &r.config);
@@ -214,6 +326,8 @@ impl ApplicationHandler for GameHandler {
                     }
                 }
                 if let PhysicalKey::Code(code) = event.physical_key {
+                    // Both Enter keys mean the same thing everywhere in the game.
+                    let code = if code == KeyCode::NumpadEnter { KeyCode::Enter } else { code };
                     match event.state {
                         ElementState::Pressed => {
                             if !event.repeat {
@@ -268,6 +382,10 @@ impl ApplicationHandler for GameHandler {
     }
 
     fn about_to_wait(&mut self, _el: &ActiveEventLoop) {
+        #[cfg(target_arch = "wasm32")]
+        if self.running.is_none() {
+            self.running = self.pending.borrow_mut().take();
+        }
         if let Some(r) = &self.running {
             r.window.request_redraw();
         }
@@ -284,8 +402,18 @@ impl Running {
         if self.fps_acc >= 0.5 {
             self.app.fps = self.fps_frames as f32 / self.fps_acc;
             self.app.frame_ms = self.fps_acc * 1000.0 / self.fps_frames as f32;
-            if std::env::var_os("ROTFALL_LOG").is_some() {
-                eprintln!("fps {:.0} wave {} zombies {} instances {} size {:?}", self.app.fps, self.app.world.wave, self.app.world.zombies.len(), self.renderer.stats.instances, (self.config.width, self.config.height));
+            if self.log {
+                let n = self.fps_frames as f32;
+                let line = format!(
+                    "fps {:.0} | sim {:.1} scene {:.1} submit {:.1} ms | wave {} zombies {} instances {} size {:?}",
+                    self.app.fps, self.cpu[0] / n, self.cpu[1] / n, self.cpu[2] / n,
+                    self.app.world.wave, self.app.world.zombies.len(), self.renderer.stats.instances, (self.config.width, self.config.height)
+                );
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::warn_1(&line.into());
+                #[cfg(not(target_arch = "wasm32"))]
+                eprintln!("{line}");
+                self.cpu = [0.0; 3];
             }
             self.fps_acc = 0.0;
             self.fps_frames = 0;
@@ -293,12 +421,17 @@ impl Running {
         // A lightly filtered timestep hides scheduler jitter; long stalls are clamped.
         self.smooth_dt += (real_dt.min(0.05) - self.smooth_dt) * 0.25;
         let size = (self.config.width, self.config.height);
+        let t0 = Instant::now();
         self.app.update(self.smooth_dt, &self.raw, size);
+        let t1 = Instant::now();
+        self.cpu[0] += (t1 - t0).as_secs_f32() * 1000.0;
         if std::mem::take(&mut self.app.ground_dirty) {
             let ground = self.app.world.map.bake_ground(GROUND_TEX);
             self.renderer.set_ground(&ground, GROUND_TEX);
         }
         self.app.draw(&mut self.frame, &self.raw, size);
+        let t2 = Instant::now();
+        self.cpu[1] += (t2 - t1).as_secs_f32() * 1000.0;
         self.raw.end_frame();
         if let Some(full) = self.app.want_fullscreen.take() {
             self.window.set_fullscreen(full.then_some(winit::window::Fullscreen::Borderless(None)));
@@ -318,6 +451,7 @@ impl Running {
         };
         let view = tex.texture.create_view(&Default::default());
         self.renderer.render(&mut self.frame, &view, size);
+        self.cpu[2] += t2.elapsed().as_secs_f32() * 1000.0;
         self.window.pre_present_notify();
         self.renderer.gpu.queue.present(tex);
     }
@@ -571,7 +705,38 @@ mod win {
     }
 }
 
+/// Hides the page's loading message once the game is on screen.
+#[cfg(target_arch = "wasm32")]
+fn web_ready() {
+    use wasm_bindgen::JsCast;
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return };
+    if let Some(e) = doc.get_element_by_id("status") {
+        e.remove();
+    }
+    // Key presses only reach a focused canvas, and players should not have to click first.
+    if let Some(c) = doc.query_selector("canvas").ok().flatten().and_then(|c| c.dyn_into::<web_sys::HtmlElement>().ok()) {
+        let _ = c.focus();
+    }
+}
+
+/// Puts a message on the page, for when there is no game to show.
+#[cfg(target_arch = "wasm32")]
+fn web_message(text: &str) {
+    web_sys::console::error_1(&text.into());
+    if let Some(e) = web_sys::window().and_then(|w| w.document()).and_then(|d| d.get_element_by_id("status")) {
+        e.set_text_content(Some(text));
+    }
+}
+
 /// Reports a problem that stops the game, somewhere the player will actually see it.
+#[cfg(target_arch = "wasm32")]
+fn fatal(text: &str) -> ! {
+    web_message(text);
+    wasm_bindgen::throw_str(text)
+}
+
+/// Reports a problem that stops the game, somewhere the player will actually see it.
+#[cfg(not(target_arch = "wasm32"))]
 fn fatal(text: &str) -> ! {
     eprintln!("{text}");
     #[cfg(windows)]
@@ -585,8 +750,10 @@ fn install_crash_log() {
     std::panic::set_hook(Box::new(move |info| {
         default(info);
         let path = game::save::data_dir().join("crash.log");
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = std::fs::create_dir_all(game::save::data_dir());
         let backtrace = std::backtrace::Backtrace::force_capture();
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = std::fs::write(&path, format!(
             "ROTFALL {}\nGPU: {}\n{info}\n\n{backtrace}\n",
             env!("CARGO_PKG_VERSION"),
@@ -594,6 +761,8 @@ fn install_crash_log() {
         ));
         #[cfg(windows)]
         win::dialog(&format!("ROTFALL crashed: {info}\n\nDetails were saved to {}", path.display()));
+        #[cfg(target_arch = "wasm32")]
+        web_message(&format!("ROTFALL crashed: {info}"));
     }));
 }
 
@@ -635,7 +804,19 @@ fn main() {
         return;
     }
     let el = EventLoop::new().expect("event loop");
-    let mut h = GameHandler { options: o, running: None };
+    let mut h = GameHandler {
+        options: o,
+        running: None,
+        window: None,
+        #[cfg(target_arch = "wasm32")]
+        pending: Default::default(),
+    };
+    #[cfg(target_arch = "wasm32")]
+    {
+        use winit::platform::web::EventLoopExtWebSys;
+        el.spawn_app(h);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     if let Err(e) = el.run_app(&mut h) {
         eprintln!("event loop error: {e}");
     }

@@ -48,10 +48,10 @@ export RUSTFLAGS="-C dlltool=$WRAP/dlltool -C link-self-contained=no"
 cargo build --release --target x86_64-pc-windows-gnu "$@"
 
 DIST=dist/rotfall-windows-x64
-rm -rf dist
+rm -rf "$DIST" "$DIST.zip"
 mkdir -p "$DIST"
 cp target/x86_64-pc-windows-gnu/release/rotfall.exe "$DIST/rotfall.exe"
-cp tools/windows/README.txt tools/windows/start-server.bat "$DIST/"
+cp LICENSE tools/windows/README.txt tools/windows/start-server.bat "$DIST/"
 python3 -I - "$DIST" <<'PY'
 import os, sys, zipfile
 root = sys.argv[1]
@@ -59,4 +59,4 @@ with zipfile.ZipFile(root + ".zip", "w", zipfile.ZIP_DEFLATED, compresslevel=9) 
     for name in sorted(os.listdir(root)):
         z.write(os.path.join(root, name), os.path.join(os.path.basename(root), name))
 PY
-ls -la dist
+ls -la "$DIST.zip"

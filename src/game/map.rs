@@ -317,25 +317,32 @@ impl Map {
     /// Paint the ground: roads, paint lines, dirt, dead grass, concrete pads.
     pub fn bake_ground(&self, size: u32) -> Vec<u8> {
         let mut out = vec![0u8; (size * size * 4) as usize];
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        let rows = (size as usize / threads).max(1);
-        std::thread::scope(|sc| {
-            for (ci, chunk) in out.chunks_mut(rows * size as usize * 4).enumerate() {
-                sc.spawn(move || {
-                    for (i, px) in chunk.chunks_exact_mut(4).enumerate() {
-                        let x = i % size as usize;
-                        let y = ci * rows + i / size as usize;
-                        let wx = (x as f32 + 0.5) / size as f32 * 2.0 * HALF - HALF;
-                        let wz = (y as f32 + 0.5) / size as f32 * 2.0 * HALF - HALF;
-                        let (c, spec) = self.ground_color(wx, wz);
-                        px[0] = (c[0].clamp(0.0, 1.0) * 255.0) as u8;
-                        px[1] = (c[1].clamp(0.0, 1.0) * 255.0) as u8;
-                        px[2] = (c[2].clamp(0.0, 1.0) * 255.0) as u8;
-                        px[3] = (spec.clamp(0.0, 1.0) * 255.0) as u8;
-                    }
-                });
+        let paint = |ci: usize, rows: usize, chunk: &mut [u8]| {
+            for (i, px) in chunk.chunks_exact_mut(4).enumerate() {
+                let x = i % size as usize;
+                let y = ci * rows + i / size as usize;
+                let wx = (x as f32 + 0.5) / size as f32 * 2.0 * HALF - HALF;
+                let wz = (y as f32 + 0.5) / size as f32 * 2.0 * HALF - HALF;
+                let (c, spec) = self.ground_color(wx, wz);
+                px[0] = (c[0].clamp(0.0, 1.0) * 255.0) as u8;
+                px[1] = (c[1].clamp(0.0, 1.0) * 255.0) as u8;
+                px[2] = (c[2].clamp(0.0, 1.0) * 255.0) as u8;
+                px[3] = (spec.clamp(0.0, 1.0) * 255.0) as u8;
             }
-        });
+        };
+        #[cfg(target_arch = "wasm32")]
+        paint(0, size as usize, &mut out);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+            let rows = (size as usize / threads).max(1);
+            let paint = &paint;
+            std::thread::scope(|sc| {
+                for (ci, chunk) in out.chunks_mut(rows * size as usize * 4).enumerate() {
+                    sc.spawn(move || paint(ci, rows, chunk));
+                }
+            });
+        }
         out
     }
 

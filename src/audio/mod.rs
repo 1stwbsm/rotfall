@@ -1,6 +1,6 @@
 //! Audio engine front-end. The audio thread owns the mixer; the game talks to it through
 //! a channel, so gameplay never blocks on the sound device.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 #[path = "alsa.rs"]
 mod backend;
 #[cfg(windows)]
@@ -138,7 +138,20 @@ impl Audio {
         Audio { tx: None }
     }
 
+    /// Browser audio: the mixer runs in Web Audio's callback on the main thread, since there
+    /// are no threads to give it. Browsers keep sound off until the player first interacts.
+    #[cfg(target_arch = "wasm32")]
+    pub fn start() -> Self {
+        let (tx, rx) = channel();
+        if let Err(e) = web_audio(rx) {
+            web_sys::console::warn_1(&e);
+            return Audio::silent();
+        }
+        Audio { tx: Some(tx) }
+    }
+
     /// Starts the audio thread; falls back to silence if the device cannot be opened.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start() -> Self {
         let (tx, rx) = channel();
         let spawned = std::thread::Builder::new().name("audio".into()).spawn(move || audio_thread(rx));
@@ -158,6 +171,48 @@ impl Audio {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn web_audio(rx: Receiver<Cmd>) -> Result<(), wasm_bindgen::JsValue> {
+    use wasm_bindgen::{closure::Closure, JsCast};
+    const FRAMES: u32 = 2048;
+    let opts = web_sys::AudioContextOptions::new();
+    opts.set_sample_rate(SR);
+    let ctx = web_sys::AudioContext::new_with_context_options(&opts)?;
+    let node = ctx.create_script_processor_with_buffer_size_and_number_of_input_channels_and_number_of_output_channels(FRAMES, 0, 2)?;
+    let mut mixer = Mixer::new(Track::Menu);
+    let mut stereo = vec![0.0f32; FRAMES as usize * 2];
+    let mut left = vec![0.0f32; FRAMES as usize];
+    let mut right = vec![0.0f32; FRAMES as usize];
+    let process = Closure::<dyn FnMut(web_sys::AudioProcessingEvent)>::new(move |e: web_sys::AudioProcessingEvent| {
+        while let Ok(c) = rx.try_recv() {
+            mixer.apply(c);
+        }
+        mixer.render(&mut stereo);
+        for (i, f) in stereo.chunks_exact(2).enumerate() {
+            left[i] = f[0];
+            right[i] = f[1];
+        }
+        if let Ok(out) = e.output_buffer() {
+            let _ = out.copy_to_channel(&mut left, 0);
+            let _ = out.copy_to_channel(&mut right, 1);
+        }
+    });
+    node.set_onaudioprocess(Some(process.as_ref().unchecked_ref()));
+    node.connect_with_audio_node(&ctx.destination())?;
+    // The callback and the unlock listener live as long as the page.
+    process.forget();
+    let target: web_sys::EventTarget = web_sys::window().ok_or("no window")?.into();
+    let unlock = Closure::<dyn FnMut()>::new(move || {
+        let _ = ctx.resume();
+    });
+    for kind in ["pointerdown", "keydown"] {
+        target.add_event_listener_with_callback(kind, unlock.as_ref().unchecked_ref())?;
+    }
+    unlock.forget();
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn audio_thread(rx: Receiver<Cmd>) {
     const RATE: u32 = SR as u32;
     let mut pcm = match backend::Pcm::open(RATE, 45_000) {

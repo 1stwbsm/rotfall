@@ -24,6 +24,7 @@ pub struct Ui<'a> {
     pub time: f32,
 }
 
+const VERSION: &str = concat!("V", env!("CARGO_PKG_VERSION"));
 pub type C = [f32; 4];
 const WHITE: C = [0.93, 0.92, 0.88, 1.0];
 const DIM: C = [0.60, 0.60, 0.58, 1.0];
@@ -788,7 +789,13 @@ fn title(app: &mut App, ui: &mut Ui) {
     if let Some(e) = &app.menu_error {
         ui.text_shadow(x, h - 46.0 * s, 2.0 * s, e, RED);
     }
-    ui.text_shadow(w - ui.text_w("V0.2", 1.0 * s) - 10.0 * s, h - 16.0 * s, 1.0 * s, "V0.2", DIM);
+    ui.text_shadow(w - ui.text_w(VERSION, 1.0 * s) - 10.0 * s, h - 16.0 * s, 1.0 * s, VERSION, DIM);
+    let notice = if cfg!(target_arch = "wasm32") {
+        "FREE SOFTWARE, GPL-3.0. SOURCE AND DESKTOP VERSION WITH CO-OP: GITHUB.COM/1STWBSM/ROTFALL"
+    } else {
+        "FREE SOFTWARE, GPL-3.0. SOURCE: GITHUB.COM/1STWBSM/ROTFALL"
+    };
+    ui.text_shadow(10.0 * s, h - 16.0 * s, 1.0 * s, notice, DIM);
     crosshair(ui);
 }
 
@@ -810,6 +817,8 @@ fn page_main(app: &mut App, ui: &mut Ui, x: f32, mut y: f32, cw: f32) {
         }
         y += step;
     }
+    // Browsers have no sockets a game server could use, so the web build is single player.
+    let multiplayer = cfg!(not(target_arch = "wasm32"));
     let rows: [(&str, &str, Page); 5] = [
         ("NEW GAME", "STANDARD OR PERMADEATH", Page::NewGame),
         ("MULTIPLAYER", "CO-OP: HOST OR JOIN", Page::Multiplayer),
@@ -818,13 +827,16 @@ fn page_main(app: &mut App, ui: &mut Ui, x: f32, mut y: f32, cw: f32) {
         ("FIELD MANUAL", "", Page::Manual),
     ];
     for (label, sub, page) in rows {
+        if page == Page::Multiplayer && !multiplayer {
+            continue;
+        }
         if menu_item(ui, x, y, cw, rh, label, sub, true) {
             app.page = page;
             app.menu_error = None;
         }
         y += step;
     }
-    if menu_item(ui, x, y, cw, rh, "QUIT", "", true) {
+    if cfg!(not(target_arch = "wasm32")) && menu_item(ui, x, y, cw, rh, "QUIT", "", true) {
         app.action = Some(Action::Quit);
     }
 }
@@ -1029,7 +1041,8 @@ fn page_options(app: &mut App, ui: &mut Ui, x: f32, mut y: f32, cw: f32) {
     y += 26.0 * s;
     field(ui, &mut app.focus, 2, x, y, cw, "YOUR NAME", &mut app.settings.name, false, 16);
     y += 50.0 * s;
-    ui.text_shadow(x, y, 1.0 * s, &format!("SAVES: {}", app.data_dir.display()), DIM);
+    let saves = if cfg!(target_arch = "wasm32") { "THIS BROWSER'S STORAGE".to_string() } else { app.data_dir.display().to_string() };
+    ui.text_shadow(x, y, 1.0 * s, &format!("SAVES: {saves}"), DIM);
     y += 18.0 * s;
     back_item(app, ui, x, y, cw, Page::Main);
 }

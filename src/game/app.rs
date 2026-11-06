@@ -116,7 +116,7 @@ impl Default for Settings {
 impl Settings {
     fn load(path: &std::path::Path) -> Settings {
         let mut s = Settings::default();
-        let Ok(text) = std::fs::read_to_string(path) else { return s };
+        let Some(text) = crate::storage::read_text(path) else { return s };
         for line in text.lines() {
             let Some((k, v)) = line.split_once('=') else { continue };
             match k {
@@ -156,7 +156,7 @@ pub struct Record {
 }
 
 pub fn load_records(path: &std::path::Path) -> Vec<Record> {
-    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let Some(text) = crate::storage::read_text(path) else { return Vec::new() };
     text.lines().filter_map(|l| {
         let p: Vec<&str> = l.splitn(5, '|').collect();
         Some(Record { mode: (*p.first()?).to_string(), wave: p.get(1)?.parse().ok()?, kills: p.get(2)?.parse().ok()?, seconds: p.get(3)?.parse().ok()?, name: (*p.get(4)?).to_string() })
@@ -356,7 +356,7 @@ impl App {
         self.screen = Screen::Playing;
         if permadeath {
             // One life from the first second: an old run in this slot is over.
-            let _ = std::fs::remove_file(self.data_dir.join(Slot::Permadeath.file()));
+            crate::storage::remove(&self.data_dir.join(Slot::Permadeath.file()));
             self.refresh_saves();
             self.world.announce("PERMADEATH - ONE LIFE", [1.0, 0.25, 0.15], 4.0, true);
         }
@@ -368,7 +368,7 @@ impl App {
     }
 
     fn load_world(&mut self, slot: Slot) -> Result<World, String> {
-        let bytes = std::fs::read(self.data_dir.join(slot.file())).map_err(|_| "NO SAVED GAME".to_string())?;
+        let bytes = crate::storage::read(&self.data_dir.join(slot.file())).ok_or_else(|| "NO SAVED GAME".to_string())?;
         save::decode(&bytes, self.audio.clone())
     }
 
@@ -649,7 +649,7 @@ impl App {
         add_record(&mut self.records, Record { mode: mode.into(), wave: st.wave_reached, kills: st.kills, seconds: st.time as u32, name }, &path);
         if self.world.permadeath {
             if let Some(slot) = self.current_slot() {
-                let _ = std::fs::remove_file(self.data_dir.join(slot.file()));
+                crate::storage::remove(&self.data_dir.join(slot.file()));
                 self.save_erased = true;
             }
             self.refresh_saves();

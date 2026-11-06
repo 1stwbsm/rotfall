@@ -322,6 +322,15 @@ fn generate(s: Sfx) -> Vec<f32> {
 }
 
 pub fn build_bank() -> Vec<Vec<f32>> {
+    // Browsers get no threads here.
+    #[cfg(target_arch = "wasm32")]
+    return ALL.iter().map(|&s| generate(s)).collect();
+    #[cfg(not(target_arch = "wasm32"))]
+    build_bank_threaded()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn build_bank_threaded() -> Vec<Vec<f32>> {
     let handles: Vec<_> = ALL
         .chunks(8)
         .map(|c| {

@@ -1866,7 +1866,7 @@ pub fn run_dedicated(cfg: ServerConfig, seed: u64, load: Option<std::path::PathB
         let empty = !world.players.iter().any(|p| p.connected);
         if world.game_over && (world.game_over_timer > 15.0 || empty) {
             if cfg.permadeath {
-                let _ = std::fs::remove_file(&path);
+                crate::storage::remove(&path);
             }
             println!("game over at wave {}; starting a new match", world.wave);
             let mut w = World::new(world.seed.wrapping_add(1), crate::audio::Audio::silent());

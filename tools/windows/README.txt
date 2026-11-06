@@ -1,5 +1,8 @@
 ROTFALL
 =======
+Written with AI. Free software under the GNU GPL version 3; see LICENSE.
+Source code: https://github.com/1stwbsm/rotfall
+
 Double-click rotfall.exe to play. Nothing needs installing.
 
 It needs 64-bit Windows 10 or 11 and a graphics driver with Vulkan or OpenGL 4.3.

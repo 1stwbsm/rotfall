@@ -45,6 +45,16 @@ impl Slot {
 /// `%APPDATA%\\rotfall` on Windows; elsewhere `$XDG_DATA_HOME/rotfall` or `~/.local/share/rotfall`.
 /// The current directory is the last resort.
 pub fn data_dir() -> PathBuf {
+    #[cfg(target_arch = "wasm32")]
+    return PathBuf::from("rotfall");
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        native_data_dir()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_data_dir() -> PathBuf {
     #[cfg(windows)]
     if let Some(x) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
         return PathBuf::from(x).join("rotfall");
@@ -59,13 +69,8 @@ pub fn data_dir() -> PathBuf {
 }
 
 /// Write-then-rename, so a crash mid-save can never destroy the previous good save.
-pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d)?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, path)
+pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
+    crate::storage::write(path, data)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -248,7 +253,7 @@ fn read_info(r: &mut Reader) -> Option<SaveInfo> {
 }
 
 pub fn peek(path: &Path) -> Option<SaveInfo> {
-    let data = std::fs::read(path).ok()?;
+    let data = crate::storage::read(path)?;
     let mut r = open(&data).ok()?;
     read_info(&mut r)
 }

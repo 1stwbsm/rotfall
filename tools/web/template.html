@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<!-- ROTFALL, free software under the GNU GPL version 3. Written with AI. Source: https://github.com/1stwbsm/rotfall -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROTFALL</title>
+<style>
+html, body { margin: 0; height: 100%; background: #05070a; overflow: hidden; }
+canvas { display: block; width: 100vw; height: 100vh; outline: none; }
+#status {
+  position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 2em; box-sizing: border-box; text-align: center; white-space: pre-line;
+  color: #d8d4c8; font: 16px/1.6 ui-monospace, Menlo, Consolas, monospace;
+}
+#status a { color: #ffb733; }
+</style>
+</head>
+<body>
+<div id="status">LOADING ROTFALL...
+
+Single player in the browser. Co-op needs the <a href="https://github.com/1stwbsm/rotfall/releases/latest">desktop version</a>.</div>
+<script>/*GLUE*/</script>
+<script>
+(async () => {
+  const status = document.getElementById("status");
+  const fail = (html) => { status.innerHTML = html; };
+  const desktop = '<a href="https://github.com/1stwbsm/rotfall/releases/latest">Download the desktop version</a>';
+  if (!navigator.gpu) {
+    fail("ROTFALL needs WebGPU, which this browser does not have turned on.\n\nCurrent Chrome, Edge, Safari and Firefox support it.\n\n" + desktop);
+    return;
+  }
+  try {
+    // The game is embedded in this one file, gzipped, as base64.
+    const packed = Uint8Array.from(atob("/*WASM*/"), (c) => c.charCodeAt(0));
+    const stream = new Blob([packed]).stream().pipeThrough(new DecompressionStream("gzip"));
+    const wasm = await new Response(stream).arrayBuffer();
+    // Give the page a moment to paint its message: startup then blocks while audio is synthesized.
+    await new Promise((r) => setTimeout(r, 30));
+    await wasm_bindgen({ module_or_path: wasm });
+  } catch (e) {
+    // winit deliberately throws to hand control to the browser's event loop.
+    if (String(e).includes("Using exceptions for control flow")) return;
+    console.error(e);
+    fail("ROTFALL could not start: " + e + "\n\n" + desktop);
+  }
+})();
+</script>
+</body>
+</html>

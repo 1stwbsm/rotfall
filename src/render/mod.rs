@@ -18,7 +18,11 @@ pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_SIZE: u32 = 2048;
 const FLASH_SHADOW_SIZE: u32 = 1024;
+// The persistent gore layer is the largest texture in the game; browsers get a lighter one.
+#[cfg(not(target_arch = "wasm32"))]
 const DECAL_SIZE: u32 = 4096;
+#[cfg(target_arch = "wasm32")]
+const DECAL_SIZE: u32 = 2048;
 const BLOOM_LEVELS: usize = 5;
 pub const MAX_INSTANCES: usize = 60_000;
 pub const MAX_PARTICLES: usize = 16_000;
@@ -237,6 +241,21 @@ impl Gpu {
             let api = if info.backend == wgpu::Backend::Vulkan { 2 } else { 1 };
             (device > 0, api, device)
         };
+        // Browsers do not list adapters: they offer one when asked.
+        #[cfg(target_arch = "wasm32")]
+        let adapter = {
+            let _ = score;
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: surface,
+                    apply_limit_buckets: false,
+                })
+                .await
+                .map_err(|e| format!("no suitable GPU adapter was found: {e}"))?
+        };
+        #[cfg(not(target_arch = "wasm32"))]
         let adapter = instance
             .enumerate_adapters(wgpu::Backends::all())
             .await
@@ -513,7 +532,8 @@ impl Renderer {
         use wgpu::TextureFormatFeatureFlags as F;
         let hdr = gpu.adapter.get_texture_format_features(HDR_FORMAT).flags;
         let depth = gpu.adapter.get_texture_format_features(DEPTH_FORMAT).flags;
-        let samples = if gpu.device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+        // WebGPU guarantees 4x for these formats, and has no feature to ask for.
+        let samples = if (cfg!(target_arch = "wasm32") || gpu.device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES))
             && hdr.contains(F::MULTISAMPLE_X4 | F::MULTISAMPLE_RESOLVE)
             && depth.contains(F::MULTISAMPLE_X4)
         {

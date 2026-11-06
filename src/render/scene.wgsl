@@ -274,7 +274,7 @@ fn fs_particle(i: POut) -> @location(0) vec4<f32> {
         cov = k * k;
     } else if (i.shape < 1.5) {
         // Puffy smoke, eroded by noise.
-        let n = textureSample(detail_tex, linear_wrap, i.world * 0.09 + i.uv * 0.05).g;
+        let n = textureSampleLevel(detail_tex, linear_wrap, i.world * 0.09 + i.uv * 0.05, 2.0).g;
         cov = clamp((1.0 - r) * (0.55 + n * 1.4) - 0.1, 0.0, 1.0);
     } else {
         // Hard droplet.
