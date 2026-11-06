@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "bash(tools/build_windows.sh)"
-    ]
-  }
-}
