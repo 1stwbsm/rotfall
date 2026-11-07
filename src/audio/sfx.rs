@@ -321,27 +321,27 @@ fn generate(s: Sfx) -> Vec<f32> {
         }
         Buy => tones(&[(0.0, 0.06, 980.0), (0.05, 0.14, 1470.0)], 1),
         Denied => tones(&[(0.0, 0.1, 180.0), (0.1, 0.16, 140.0)], 1),
-        // The menu speaks the soundtrack's language: its harp, its timpani and its A minor.
+        // The menu speaks the soundtrack's language: its pluck, its stab and its A minor.
         MenuHover => {
             let mut v = vec![0.0; len(0.06)];
             clack(&mut v, 0.0, 3600.0, 3.0, 0.09, 170.0, id);
-            add_pluck(&mut v, 0.0, midi_hz(88.0), 0.04, id);
+            add_pluck(&mut v, 0.0, midi_hz(88.0), 0.04);
             v
         }
         MenuSelect => {
             let mut v = vec![0.0; len(0.7)];
             clack(&mut v, 0.0, 2400.0, 1.2, 0.28, 120.0, id);
             knock(&mut v, 0.0, 150.0, 34.0, 0.32);
-            add_pluck(&mut v, 0.0, midi_hz(69.0), 0.34, id);
-            add_pluck(&mut v, 0.035, midi_hz(76.0), 0.3, id + 1);
+            add_pluck(&mut v, 0.0, midi_hz(69.0), 0.34);
+            add_pluck(&mut v, 0.035, midi_hz(76.0), 0.3);
             v
         }
         MenuBack => {
             let mut v = vec![0.0; len(0.7)];
             clack(&mut v, 0.0, 1700.0, 1.2, 0.22, 130.0, id);
             knock(&mut v, 0.0, 115.0, 30.0, 0.26);
-            add_pluck(&mut v, 0.0, midi_hz(76.0), 0.26, id);
-            add_pluck(&mut v, 0.05, midi_hz(69.0), 0.28, id + 1);
+            add_pluck(&mut v, 0.0, midi_hz(76.0), 0.26);
+            add_pluck(&mut v, 0.05, midi_hz(69.0), 0.28);
             v
         }
         MenuToggle => {
@@ -363,7 +363,7 @@ fn generate(s: Sfx) -> Vec<f32> {
             knock(&mut v, 0.0, 78.0, 18.0, 0.32);
             v
         }
-        MenuConfirm => orchestra_hit(id),
+        MenuConfirm => synth_hit(id),
     }
 }
 
@@ -386,62 +386,47 @@ fn knock(out: &mut [f32], start: f32, hz: f32, decay: f32, gain: f32) {
     }
 }
 
-/// A plucked harp string: a loop of noise that loses its top end as it circulates.
-fn add_pluck(out: &mut [f32], start: f32, hz: f32, gain: f32, seed: u32) {
-    let mut n = Noise(seed * 2 + 1);
-    let period = ((SR / hz) as usize).max(4);
-    let mut string = Vec::with_capacity(period);
-    let mut last = 0.0;
-    for _ in 0..period {
-        last += (n.next() - last) * 0.55;
-        string.push(last);
-    }
-    let (mut at, mut prev) = (0, 0.0);
+/// The soundtrack's synth pluck: a saw and a pulse with the filter falling shut.
+fn add_pluck(out: &mut [f32], start: f32, hz: f32, gain: f32) {
+    let (mut p0, mut p1, mut f) = (0.0f32, 0.0f32, Svf::default());
     for (i, o) in out.iter_mut().skip(len(start)).enumerate() {
-        let v = string[at];
-        let next = (v + prev) * 0.4975;
-        prev = v;
-        string[at] = next;
-        at = (at + 1) % period;
-        *o += v * gain * (i as f32 / 60.0).min(1.0);
+        let t = i as f32 / SR;
+        let (d0, d1) = (hz / SR, hz * 2.003 / SR);
+        p0 = (p0 + d0).fract();
+        p1 = (p1 + d1).fract();
+        let s = saw(p0, d0) + 0.4 * pulse(p1, d1, 0.4);
+        let cut = 700.0 + 3000.0 * (-t * 10.0).exp();
+        *o += f.process(s * 0.6, cut, 1.2).lp * (-t * 6.0).exp() * (t / 0.002).min(1.0) * gain;
     }
 }
 
-/// Starting a run: the whole orchestra on one A minor chord, with timpani, in the score's hall.
-fn orchestra_hit(seed: u32) -> Vec<f32> {
+/// Starting a run: one huge saw stab on A minor and a sub drop, through the score's reverb.
+fn synth_hit(seed: u32) -> Vec<f32> {
     let mut n = Noise(seed * 2 + 1);
-    let (mut body, mut skin) = (Svf::default(), Svf::default());
-    let mut hall = Reverb::new();
+    let (mut body, mut hall) = (Svf::default(), Reverb::new());
     const NOTES: [f32; 6] = [45.0, 57.0, 60.0, 64.0, 69.0, 72.0];
     let mut phases = [[0.0f32; 3]; NOTES.len()];
     for p in phases.iter_mut().flatten() {
         *p = n.next().abs();
     }
     let hz = NOTES.map(midi_hz);
-    let (mut p1, mut p2) = (0.0f32, 0.0f32);
-    let tail = len(1.9);
-    let mut v: Vec<f32> = (0..tail)
+    let mut sub = 0.0f32;
+    let mut v: Vec<f32> = (0..len(1.9))
         .map(|i| {
             let t = i as f32 / SR;
             let mut s = 0.0;
             for (ps, &f) in phases.iter_mut().zip(&hz) {
                 for (k, p) in ps.iter_mut().enumerate() {
-                    let fr = f * [0.997, 1.0, 1.004][k];
-                    let d = fr / SR;
+                    let d = f * [0.992, 1.0, 1.009][k] / SR;
                     *p = (*p + d).fract();
                     s += saw(*p, d);
                 }
             }
-            let cut = 420.0 + 5200.0 * (-t * 11.0).exp();
-            let hit = body.process(s * 0.09, cut, 1.1).lp;
-            let brass = soft_clip(hit * 1.7) * (t / 0.004).min(1.0) * (-t * 5.5).exp() * 0.5;
-            let bend = 1.0 + 0.08 * (-t * 30.0).exp();
-            p1 = (p1 + 110.0 * bend / SR).fract();
-            p2 = (p2 + 165.4 * bend / SR).fract();
-            let felt = skin.process(n.next(), 800.0, 0.8).lp * (-t * 70.0).exp();
-            let timp = (sine(p1) * (-t * 3.4).exp() + sine(p2) * (-t * 5.5).exp() * 0.5 + felt * 0.8) * 0.42;
-            let dry = brass + timp;
-            let (l, r) = hall.process(dry * 0.5, 0.82, 0.35);
+            let cut = 400.0 + 5200.0 * (-t * 11.0).exp();
+            let stab = soft_clip(body.process(s * 0.09, cut, 1.3).lp * 1.7) * (t / 0.002).min(1.0) * (-t * 6.0).exp() * 0.5;
+            sub = (sub + (45.0 + 70.0 * (-t * 20.0).exp()) / SR).fract();
+            let dry = stab + soft_clip(sine(sub) * 1.5) * (-t * 4.0).exp() * 0.42;
+            let (l, r) = hall.process(dry * 0.5, 0.82, 0.3);
             dry + (l + r) * 0.45
         })
         .collect();

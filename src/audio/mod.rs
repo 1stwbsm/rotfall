@@ -460,12 +460,12 @@ mod tests {
     fn every_melody_note_parses() {
         for t in TRACKS {
             for s in song(t).sections {
-                for tok in s.lead.split_whitespace().chain(s.counter.split_whitespace()).chain(s.horn.split_whitespace()) {
+                for tok in s.lead.split_whitespace().chain(s.counter.split_whitespace()).chain(s.brass.split_whitespace()) {
                     let n = tok.split(':').next().unwrap();
                     assert!(n == "-" || parse_note(n).is_some(), "bad note {tok} in {t:?}");
                     assert!(tok.split(':').nth(1).and_then(|v| v.parse::<u32>().ok()).is_some(), "bad len {tok}");
                 }
-                for p in [s.kick, s.snare, s.hat, s.ride, s.bass, s.acid, s.arp, s.low, s.timp, s.boom, s.stab] {
+                for p in [s.kick, s.snare, s.hat, s.ride, s.bass, s.acid, s.arp, s.low, s.tom, s.sub, s.stab] {
                     assert!(p.is_empty() || p.len() == 16, "pattern `{p}` in {t:?} is not 16 steps");
                 }
             }
@@ -473,7 +473,7 @@ mod tests {
     }
 
     fn lines_of(s: &Section) -> [(&'static str, &'static str); 3] {
-        [("lead", s.lead), ("counter", s.counter), ("horn", s.horn)]
+        [("lead", s.lead), ("counter", s.counter), ("brass", s.brass)]
     }
 
     #[test]

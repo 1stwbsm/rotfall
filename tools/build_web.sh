@@ -16,7 +16,7 @@ OUT=target/web
 "$BINDGEN" --target no-modules --no-typescript --out-dir $OUT target/$TARGET/release/rotfall.wasm
 mkdir -p dist
 python3 -I - $OUT tools/web/template.html dist/rotfall-web.html <<'PY'
-import base64, gzip, sys
+import base64, gzip, re, sys
 out, template, dest = sys.argv[1:4]
 page = open(template).read()
 glue = open(out + "/rotfall.js").read()
@@ -25,7 +25,10 @@ if "</script" in glue:
     sys.exit("the generated JavaScript would end its script tag early")
 packed = base64.b64encode(gzip.compress(wasm, 9, mtime=0)).decode()
 icon = base64.b64encode(open("assets/icon_80x80.png", "rb").read()).decode()
-page = page.replace("/*ICON*/", icon).replace("/*GLUE*/", glue).replace("/*WASM*/", packed)
+version = re.search(r'^version = "(.+)"', open("Cargo.toml").read(), re.M).group(1)
+# Published next to the page on the website, so that stale copies can tell they are stale.
+open("dist/version.txt", "w").write(version + "\n")
+page = page.replace("/*VERSION*/", version).replace("/*ICON*/", icon).replace("/*GLUE*/", glue).replace("/*WASM*/", packed)
 open(dest, "w").write(page)
 print("%s: %.1f MB (WebAssembly %.1f MB before compression)" % (dest, len(page) / 1e6, len(wasm) / 1e6))
 PY

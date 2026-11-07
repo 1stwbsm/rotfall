@@ -33,6 +33,24 @@ canvas { display: block; width: 100vw; height: 100vh; outline: none; touch-actio
 <div id="status">LOADING ROTFALL...
 
 Single player in the browser. Co-op needs the <a href="https://github.com/1stwbsm/rotfall/releases/latest">desktop version</a>.</div>
+<script>
+// Browsers may reuse a cached copy of this page, so ask the site which version is current. If this
+// copy is out of date, refresh the cache and reload, once per new version. Copies opened from disk
+// or hosted elsewhere have no such file, and simply carry on.
+(async () => {
+    const here = "/*VERSION*/";
+    try {
+        if (!location.protocol.startsWith("http")) return;
+        const res = await fetch("version.txt", { cache: "no-store" });
+        const latest = res.ok ? (await res.text()).trim() : "";
+        if (!/^\d+\.\d+\.\d+$/.test(latest) || latest === here) return;
+        if (sessionStorage.getItem("rotfall-updated-to") === latest) return;
+        sessionStorage.setItem("rotfall-updated-to", latest);
+        await fetch(location.href, { cache: "reload" });
+        location.reload();
+    } catch (e) {}
+})();
+</script>
 <script>/*GLUE*/</script>
 <script>
 (async () => {
