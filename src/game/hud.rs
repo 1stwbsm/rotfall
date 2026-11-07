@@ -1194,20 +1194,29 @@ fn page_soundtrack(app: &mut App, ui: &mut Ui, x: f32, mut y: f32, cw: f32) {
         }
         let saving = app.ost.as_ref().is_some_and(|r| r.track == t);
         let waiting = app.ost_queue.contains(&t);
-        if ui.button(x + pw - 86.0 * s, y + 1.0 * s, 80.0 * s, rh - 4.0 * s, if saving { "WORKING" } else if waiting { "QUEUED" } else { "WAV" }, 1.0 * s, !saving && !waiting) {
+        // A track already in the archive being built is not offered separately meanwhile.
+        let free = !saving && !waiting && app.ost_zip.is_none();
+        if ui.button(x + pw - 86.0 * s, y + 1.0 * s, 80.0 * s, rh - 4.0 * s, if saving { "WORKING" } else if waiting { "QUEUED" } else { "WAV" }, 1.0 * s, free) {
             app.queue_soundtrack(&[t]);
         }
         y += rh;
     }
     y += 6.0 * s;
-    if ui.button(x, y, 220.0 * s, 28.0 * s, "DOWNLOAD ALL AS WAV", 1.0 * s, true) {
-        app.queue_soundtrack(&Track::ALL);
+    let label = if cfg!(target_arch = "wasm32") { "DOWNLOAD ALL AS ZIP" } else { "DOWNLOAD ALL AS WAV" };
+    if ui.button(x, y, 220.0 * s, 28.0 * s, label, 1.0 * s, app.ost_zip.is_none() && app.ost.is_none() && app.ost_queue.is_empty()) {
+        app.download_all_tracks();
     }
     if let Some(r) = &app.ost {
-        ui.bar(x + 230.0 * s, y + 8.0 * s, (pw - 230.0 * s).max(40.0), 12.0 * s, r.progress(), ACCENT);
+        // Overall progress across everything queued, not just the current file.
+        let total = Track::ALL.len() as f32;
+        let k = if app.ost_zip.is_some() { (total - app.ost_queue.len() as f32 - 1.0 + r.progress()) / total } else { r.progress() };
+        ui.bar(x + 230.0 * s, y + 8.0 * s, (pw - 230.0 * s).max(40.0), 12.0 * s, k, ACCENT);
     }
     y += 34.0 * s;
-    if !app.ost_status.is_empty() {
+    if app.ost_zip.is_some() {
+        let n = Track::ALL.len() - app.ost_queue.len();
+        ui.text_shadow(x, y, 1.0 * s, &format!("BUILDING THE ZIP: TRACK {n} OF {}. KEEP THIS TAB VISIBLE", Track::ALL.len()), ACCENT);
+    } else if !app.ost_status.is_empty() {
         let text: String = app.ost_status.chars().take(((pw) / (6.0 * s.round().max(1.0))) as usize).collect();
         ui.text_shadow(x, y, 1.0 * s, &text, GREEN);
     }

@@ -48,14 +48,11 @@ impl Rng {
 }
 
 pub fn crc32(data: &[u8]) -> u32 {
-    let mut c = 0xFFFF_FFFFu32;
-    for &b in data {
-        c ^= b as u32;
-        for _ in 0..8 {
-            c = if c & 1 != 0 { 0xEDB88320 ^ (c >> 1) } else { c >> 1 };
-        }
-    }
-    !c
+    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        std::array::from_fn(|i| (0..8).fold(i as u32, |c, _| if c & 1 != 0 { 0xEDB88320 ^ (c >> 1) } else { c >> 1 }))
+    });
+    !data.iter().fold(0xFFFF_FFFFu32, |c, &b| table[((c ^ b as u32) & 255) as usize] ^ (c >> 8))
 }
 
 /// Encode 8-bit RGBA into an (uncompressed-deflate) PNG file.

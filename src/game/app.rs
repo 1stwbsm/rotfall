@@ -9,10 +9,15 @@ use super::view::{self, Camera};
 use super::{tile_of, World};
 use super::touch::TouchState;
 use crate::audio::{Audio, Cmd, OstRender, Sfx, Track};
+use crate::zip::ZipWriter;
 use crate::render::{FrameData, MenuView};
 use glam::{vec3, Vec2};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 use winit::keyboard::KeyCode as K;
 
 #[derive(Default)]
@@ -231,6 +236,8 @@ pub struct App {
     pub ost_queue: VecDeque<Track>,
     pub ost: Option<OstRender>,
     pub ost_status: String,
+    /// The browser's "download all": one archive, as pages may not start eleven downloads.
+    pub ost_zip: Option<ZipWriter>,
     pub touch: TouchState,
 }
 
@@ -294,6 +301,7 @@ impl App {
             ost_queue: VecDeque::new(),
             ost: None,
             ost_status: String::new(),
+            ost_zip: None,
             touch: TouchState::default(),
         };
         app.refresh_saves();
@@ -711,6 +719,21 @@ impl App {
         }
     }
 
+    /// The whole album: one zip in a browser, separate files in a folder on the desktop.
+    pub fn download_all_tracks(&mut self) {
+        if cfg!(target_arch = "wasm32") {
+            self.start_soundtrack_zip();
+        } else {
+            self.queue_soundtrack(&Track::ALL);
+        }
+    }
+
+    pub fn start_soundtrack_zip(&mut self) {
+        self.ost_zip = Some(ZipWriter::new());
+        self.ost_status.clear();
+        self.queue_soundtrack(&Track::ALL);
+    }
+
     /// Queues soundtrack files for rendering and saving.
     pub fn queue_soundtrack(&mut self, tracks: &[Track]) {
         for t in tracks {
@@ -720,21 +743,38 @@ impl App {
         }
     }
 
-    /// Does a slice of rendering each frame, so the menus keep moving while files are made.
+    /// Renders for a few milliseconds each frame, so the menus keep moving while files are made.
     fn advance_soundtrack_export(&mut self) {
-        if self.ost.is_none() {
-            self.ost = self.ost_queue.pop_front().map(OstRender::new);
+        let start = Instant::now();
+        while start.elapsed().as_secs_f32() < 0.008 {
+            if self.ost.is_none() {
+                self.ost = self.ost_queue.pop_front().map(OstRender::new);
+            }
+            let Some(r) = &mut self.ost else { break };
+            if r.advance(2048) {
+                let (name, wav) = (r.file_name(), r.wav());
+                self.ost = None;
+                match &mut self.ost_zip {
+                    Some(zip) => zip.add(&name, &wav),
+                    None => {
+                        self.ost_status = match crate::storage::deliver(&name, &wav) {
+                            Ok(place) => format!("SAVED {name} TO {place}"),
+                            Err(e) => format!("COULD NOT SAVE {name}: {e}"),
+                        };
+                    }
+                }
+                // Each file is a natural place to give the frame back.
+                break;
+            }
         }
-        let Some(r) = &mut self.ost else { return };
-        // Slices are sized for the browser, which shares this thread with everything else.
-        let slice = if cfg!(target_arch = "wasm32") { 4096 } else { 16384 };
-        if r.advance(slice) {
-            let name = r.file_name();
-            self.ost_status = match crate::storage::deliver(&name, &r.wav()) {
-                Ok(place) => format!("SAVED {name} TO {place}"),
-                Err(e) => format!("COULD NOT SAVE {name}: {e}"),
-            };
-            self.ost = None;
+        if self.ost.is_none() && self.ost_queue.is_empty() {
+            if let Some(zip) = self.ost_zip.take() {
+                const NAME: &str = "ROTFALL Soundtrack.zip";
+                self.ost_status = match crate::storage::deliver(NAME, &zip.finish()) {
+                    Ok(place) => format!("SAVED {NAME} TO {place}"),
+                    Err(e) => format!("COULD NOT SAVE {NAME}: {e}"),
+                };
+            }
         }
     }
 
@@ -1684,6 +1724,19 @@ mod tests {
         d.app.page = Page::Extras;
         d.run(2);
         assert_eq!(d.app.music_now, Some(Track::Menu), "leaving the list stops it");
+    }
+
+    #[test]
+    fn the_album_zip_collects_every_track_while_the_menu_keeps_running() {
+        let mut d = Driver::new("zip_queue");
+        d.run(1);
+        d.app.page = Page::Soundtrack;
+        d.app.start_soundtrack_zip();
+        assert_eq!(d.app.ost_queue.len(), Track::ALL.len());
+        d.run(3);
+        assert!(d.app.ost.is_some() || d.app.ost_queue.len() < Track::ALL.len(), "work has started");
+        assert!(d.app.ost_zip.is_some(), "and is going into the archive");
+        assert_eq!(d.app.screen, Screen::Title);
     }
 
     #[test]

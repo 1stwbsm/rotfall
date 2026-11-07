@@ -10,6 +10,7 @@ mod render;
 mod storage;
 mod util;
 mod wire;
+mod zip;
 
 use audio::{Audio, Track};
 use game::app::{Action, App, RawInput};

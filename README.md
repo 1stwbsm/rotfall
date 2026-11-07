@@ -127,7 +127,8 @@ the browser URL to try it on any screen.
 ## Extras
 
 The main menu's Extras page has a gallery of art and screenshots and the soundtrack, where you can listen
-to every track and download it as a WAV. On the desktop, downloads go to `Music/ROTFALL Soundtrack`.
+to every track and download it as a WAV. On the desktop, downloads go to `Music/ROTFALL Soundtrack`; in a browser, "download all" builds a single
+zip.
 `rotfall --export-ost FOLDER` writes the whole album.
 
 ## How it's built

@@ -109,7 +109,7 @@ mod imp {
         let bytes = js_sys::Uint8Array::from(data);
         let parts = js_sys::Array::of1(&bytes);
         let opts = web_sys::BlobPropertyBag::new();
-        opts.set_type("audio/wav");
+        opts.set_type(if name.ends_with(".zip") { "application/zip" } else { "audio/wav" });
         let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &opts).map_err(fail)?;
         let url = web_sys::Url::create_object_url_with_blob(&blob).map_err(fail)?;
         let doc = web_sys::window().and_then(|w| w.document()).ok_or("no page")?;
