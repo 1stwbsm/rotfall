@@ -17,17 +17,37 @@ pub struct Camera {
     pub eye: Vec3,
     pub view_proj: Mat4,
     pub inv: Mat4,
+    /// Rotation around the player, in radians. Zero looks north, as the minimap does.
+    pub yaw: f32,
+    /// Easing back to zero after a double right click.
+    pub yaw_home: bool,
 }
 
 const CAM_OFFSET: Vec3 = Vec3::new(0.0, 22.5, 16.5);
 
 impl Camera {
     pub fn new() -> Self {
-        Camera { focus: Vec3::ZERO, zoom: 1.0, punch: 1.0, eye: CAM_OFFSET, view_proj: Mat4::IDENTITY, inv: Mat4::IDENTITY }
+        Camera { focus: Vec3::ZERO, zoom: 1.0, punch: 1.0, eye: CAM_OFFSET, view_proj: Mat4::IDENTITY, inv: Mat4::IDENTITY, yaw: 0.0, yaw_home: false }
+    }
+
+    /// The straight line through a window position, as an eye position and a unit direction.
+    pub fn cursor_ray(&self, mx: f32, my: f32, w: f32, h: f32) -> (Vec3, Vec3) {
+        let ndc = vec3(mx / w * 2.0 - 1.0, 1.0 - my / h * 2.0, 0.5);
+        (self.eye, (self.inv.project_point3(ndc) - self.eye).normalize_or(Vec3::NEG_Y))
     }
 
     pub fn update(&mut self, target: Vec3, dt: f32, aspect: f32, shake: f32, time: f32) {
         self.focus = self.focus.lerp(target, (dt * 7.0).min(1.0));
+        if self.yaw_home {
+            // The short way round, however many turns the player has wound up.
+            let tau = std::f32::consts::TAU;
+            self.yaw = (self.yaw + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI;
+            self.yaw *= 1.0 - (dt * 10.0).min(1.0);
+            if self.yaw.abs() < 0.002 {
+                self.yaw = 0.0;
+                self.yaw_home = false;
+            }
+        }
         let s = shake * shake;
         let off = vec3(
             ((time * 41.0).sin() + (time * 73.0).sin() * 0.5) * s * 1.1,
@@ -35,7 +55,7 @@ impl Camera {
             ((time * 47.0).cos() + (time * 91.0).sin() * 0.5) * s * 1.1,
         );
         let focus = self.focus + off;
-        self.eye = focus + CAM_OFFSET * self.zoom * self.punch;
+        self.eye = focus + super::player::rotate_y(CAM_OFFSET, self.yaw) * self.zoom * self.punch;
         let view = look_at_rh(self.eye, focus, Vec3::Y);
         let proj = perspective_rh(38f32.to_radians(), aspect, 1.0, 180.0);
         self.view_proj = proj * view;
@@ -485,31 +505,33 @@ pub fn draw_world(w: &mut World, cam: &Camera, frame: &mut FrameData, ghost: Opt
         let fwd = vec3(p.facing.x, 0.0, p.facing.y);
         let grip = pose[R_HAND];
         // Guns are authored with the barrel along +Z.
-        let mm = Mat4::from_cols(right.extend(0.0), Vec3::Y.extend(0.0), fwd.extend(0.0), grip.extend(1.0));
+        let barrel = p.aim_dir();
+        let up = barrel.cross(right).normalize_or(Vec3::Y);
+        let mm = Mat4::from_cols(right.extend(0.0), up.extend(0.0), barrel.extend(0.0), grip.extend(1.0));
         frame.instances[gun_mesh(p.weapon)].push(Instance::new(&mm, [1.0; 3], 4.0));
         // Laser sight.
         let from = p.muzzle();
-        let wall = w.map.raycast(from, fwd, 34.0).unwrap_or(34.0);
-        let mut laser = wall;
+        let shot = p.shot_dir();
+        let mut laser = w.map.raycast(from, shot, 34.0).unwrap_or(34.0);
+        if shot.y < -1e-4 {
+            laser = laser.min(-from.y / shot.y);
+        }
         for z in &w.zombies {
-            let d = z.pos + Vec3::Y * from.y - from;
-            let t = d.x * fwd.x + d.z * fwd.z;
-            if t > 0.0 && t < laser {
-                let perp2 = d.x * d.x + d.z * d.z - t * t;
-                if perp2 < z.radius * z.radius {
+            if let Some((t, _)) = super::combat::ray_zombie(z, w.time, from, shot, true) {
+                if t > 0.0 && t < laser {
                     laser = t;
                 }
             }
         }
         frame.particles.push(crate::render::Particle {
-            pos: (from + fwd * laser).to_array(),
+            pos: (from + shot * laser).to_array(),
             size: 0.012,
-            stretch: (fwd * laser).to_array(),
+            stretch: (shot * laser).to_array(),
             shape: 0.0,
             color: [2.2, 0.15, 0.12, 0.0],
         });
         frame.particles.push(crate::render::Particle {
-            pos: (from + fwd * laser).to_array(),
+            pos: (from + shot * laser).to_array(),
             size: 0.09,
             stretch: [0.0; 3],
             shape: 0.0,

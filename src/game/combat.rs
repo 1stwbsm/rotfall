@@ -37,6 +37,56 @@ impl ProjKind {
     }
 }
 
+const BARREL_RADIUS: f32 = 0.45;
+const BARREL_TOP: f32 = 1.3;
+
+/// Where a ray passes through an upright cylinder standing on the ground: entry and exit distances.
+pub fn ray_cylinder(from: Vec3, dir: Vec3, at: Vec3, radius: f32, top: f32) -> Option<(f32, f32)> {
+    let d = Vec2::new(dir.x, dir.z);
+    let o = Vec2::new(from.x - at.x, from.z - at.z);
+    let a = d.length_squared();
+    if a < 1e-6 {
+        return None;
+    }
+    let b = o.dot(d);
+    let disc = b * b - a * (o.length_squared() - radius * radius);
+    if disc < 0.0 {
+        return None;
+    }
+    let root = disc.sqrt();
+    let (mut t0, mut t1) = ((-b - root) / a, (-b + root) / a);
+    if dir.y.abs() < 1e-6 {
+        if from.y < 0.0 || from.y > top {
+            return None;
+        }
+    } else {
+        let (ya, yb) = (-from.y / dir.y, (top - from.y) / dir.y);
+        t0 = t0.max(ya.min(yb));
+        t1 = t1.min(ya.max(yb));
+    }
+    (t0 <= t1).then_some((t0, t1))
+}
+
+/// Where a unit ray strikes a zombie, and whether it found the head. Anything just behind the
+/// muzzle still counts, since a gun can be pushed right through something at point blank.
+pub fn ray_zombie(z: &super::zombie::Zombie, time: f32, from: Vec3, dir: Vec3, heads: bool) -> Option<(f32, bool)> {
+    let s = z.scale;
+    if heads && ray_cylinder(from, dir, z.pos, z.radius + 0.45 * s, z.body_top() + 0.4 * s).is_some() {
+        let m = z.pose(time)[HEAD] - from;
+        let along = m.dot(dir);
+        let r = 0.3 * s;
+        let miss2 = m.length_squared() - along * along;
+        if miss2 < r * r {
+            let t = along - (r * r - miss2).sqrt();
+            if t > -0.3 {
+                return Some((t, true));
+            }
+        }
+    }
+    let (t, far) = ray_cylinder(from, dir, z.pos, z.radius * 1.07, z.body_top())?;
+    (far > -0.3).then_some((t, false))
+}
+
 pub struct Projectile {
     pub kind: ProjKind,
     pub pos: Vec3,
@@ -150,27 +200,78 @@ impl World {
         self.fx.blood(pose[if is_leg { PELVIS } else { CHEST }], Vec3::Y + vel * 0.1, 18, 5.0);
     }
 
+    /// Where a ray meets the ground, if it is heading that way.
+    fn ground_t(from: Vec3, dir: Vec3) -> Option<f32> {
+        (dir.y < -1e-4 && from.y > 0.0).then(|| -from.y / dir.y)
+    }
+
+    /// What the cursor is really over: the first zombie along the camera's ray, with its head as a
+    /// target of its own, then a barrel, then the ground. Guns fire at exactly this point.
+    pub fn aim_point(&self, eye: Vec3, ray: Vec3) -> Vec3 {
+        let mut best = f32::MAX;
+        let mut point = Self::ground_t(eye, ray).map_or(eye + ray * 40.0, |t| eye + ray * t);
+        for z in &self.zombies {
+            if z.spawn_t > 0.5 {
+                continue;
+            }
+            let Some((t, head)) = ray_zombie(z, self.time, eye, ray, true) else { continue };
+            if t >= best {
+                continue;
+            }
+            best = t;
+            point = if head {
+                z.pose(self.time)[HEAD]
+            } else {
+                // The body's center along this line of sight, so that shots don't just graze it.
+                let (o, d) = (Vec2::new(z.pos.x - eye.x, z.pos.z - eye.z), Vec2::new(ray.x, ray.z));
+                let mid = eye + ray * (o.dot(d) / d.length_squared().max(1e-5));
+                let low = z.crawling || z.kind == ZKind::Crawler;
+                let top = z.scale * if low { 0.5 } else { 1.5 };
+                vec3(mid.x, mid.y.clamp(0.3 * z.scale, top), mid.z)
+            };
+        }
+        for b in &self.barrels {
+            if let Some((t, _)) = ray_cylinder(eye, ray, b.pos, BARREL_RADIUS, BARREL_TOP) {
+                if t < best {
+                    best = t;
+                    point = vec3(b.pos.x, BARREL_TOP * 0.6, b.pos.z);
+                }
+            }
+        }
+        point
+    }
+
     /// Hitscan shot: damages everything along the ray up to `pierce` extra targets.
     #[allow(clippy::too_many_arguments)]
     pub fn hitscan(&mut self, from: Vec3, dir: Vec3, range: f32, damage: f32, pierce: u32, knock: f32, gore: f32, tracer: [f32; 3], width: f32) -> Vec3 {
         let wall = self.map.raycast(from, dir, range);
-        let limit = wall.unwrap_or(range);
+        let blocker = match (wall, Self::ground_t(from, dir)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let limit = blocker.unwrap_or(range).min(range);
+        // Level fire has no aim height to judge a head by, so sentries and touch controls score
+        // critical hits by how squarely they strike. Anything aimed in 3D has to find the head.
+        let level = dir.y.abs() < 0.01;
+        let time = self.time;
+        let flat = Vec2::new(dir.x, dir.z).normalize_or_zero();
         let mut hits = std::mem::take(&mut self.hit_scratch);
         hits.clear();
         for (i, z) in self.zombies.iter().enumerate() {
             if z.spawn_t > 0.5 {
                 continue;
             }
-            let d = z.pos + Vec3::Y * from.y - from;
-            let t = d.x * dir.x + d.z * dir.z;
-            if t < -0.3 || t > limit + z.radius {
+            let Some((t, head)) = ray_zombie(z, time, from, dir, !level) else { continue };
+            if t > limit {
                 continue;
             }
-            let perp2 = d.x * d.x + d.z * d.z - t * t;
-            // Crawlers lie low but the top-down aim plane still counts them as hit.
-            if perp2 < z.radius * z.radius * 1.15 {
-                hits.push((t, i as u32, perp2.max(0.0).sqrt()));
-            }
+            let crit = if level {
+                let o = Vec2::new(z.pos.x - from.x, z.pos.z - from.z);
+                (o.x * flat.y - o.y * flat.x).abs() < z.radius * 0.28
+            } else {
+                head
+            };
+            hits.push((t, i as u32, crit));
         }
         hits.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
 
@@ -179,15 +280,13 @@ impl World {
         let mut left = pierce + 1;
         let mut hit_something = false;
         for k in 0..hits.len() {
-            let (t, i, perp) = hits[k];
+            let (t, i, crit) = hits[k];
             let i = i as usize;
-            let point = from + dir * t;
-            // Hits close to the body's center line count as headshots.
-            let crit = perp < self.zombies[i].radius * 0.28;
+            let point = from + dir * t.max(0.0);
             if crit {
                 self.stats.headshots += 1;
             }
-            self.damage_zombie(i, dmg, point + Vec3::Y * 0.2, dir, knock, gore, crit);
+            self.damage_zombie(i, dmg, point, dir, knock, gore, crit);
             hit_something = true;
             dmg *= 0.85;
             left -= 1;
@@ -202,15 +301,11 @@ impl World {
         let end = end_t;
         let mut hit_barrel = None;
         for (bi, b) in self.barrels.iter().enumerate() {
-            let d = b.pos - from;
-            let t = d.x * dir.x + d.z * dir.z;
-            if t < 0.0 || t > end {
-                continue;
-            }
-            let perp2 = d.x * d.x + d.z * d.z - t * t;
-            if perp2 < 0.2 {
-                hit_barrel = Some((bi, t));
-                break;
+            if let Some((t, far)) = ray_cylinder(from, dir, b.pos, BARREL_RADIUS, BARREL_TOP) {
+                if far >= 0.0 && t <= end {
+                    hit_barrel = Some((bi, t.max(0.0)));
+                    break;
+                }
             }
         }
         if let Some((bi, t)) = hit_barrel {
@@ -222,7 +317,7 @@ impl World {
 
         let to = from + dir * end_t;
         self.fx.tracer(from, to, tracer, width);
-        if !hit_something && wall.is_some() {
+        if !hit_something && blocker.is_some_and(|b| b <= range) {
             for _ in 0..3 {
                 let v = (-dir + self.rng.dir3() * 0.7) * self.rng.range(2.0, 7.0);
                 self.fx.spark(to, v, [8.0, 5.0, 1.5], 0.25);
@@ -365,19 +460,16 @@ impl World {
 
     pub fn beam(&mut self, from: Vec3, dir: Vec3, range: f32, damage: f32) {
         let wall = self.map.raycast(from, dir, range).unwrap_or(range);
+        let wall = Self::ground_t(from, dir).map_or(wall, |g| wall.min(g));
         let mut hits: Vec<(f32, usize)> = Vec::new();
         for (i, z) in self.zombies.iter().enumerate() {
             if z.spawn_t > 0.5 {
                 continue;
             }
-            let d = z.pos + Vec3::Y * from.y - from;
-            let t = d.x * dir.x + d.z * dir.z;
-            if t < 0.0 || t > wall {
-                continue;
-            }
-            let perp2 = d.x * d.x + d.z * d.z - t * t;
-            if perp2 < (z.radius + 0.14) * (z.radius + 0.14) {
-                hits.push((t, i));
+            if let Some((t, _)) = ray_cylinder(from, dir, z.pos, z.radius + 0.14, z.body_top()) {
+                if t <= wall {
+                    hits.push((t.max(0.0), i));
+                }
             }
         }
         hits.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
@@ -469,7 +561,7 @@ impl World {
                 let hit_z = self.zombies.iter().any(|z| {
                     z.spawn_t <= 0.5 && Vec2::new(z.pos.x - next.x, z.pos.z - next.z).length_squared() < (z.radius + 0.3).powi(2)
                 });
-                if wall.is_some() || hit_z || p.ttl <= 0.0 || self.barrel_contact(next, 0.5) {
+                if wall.is_some() || hit_z || p.ttl <= 0.0 || next.y <= 0.05 || self.barrel_contact(next, 0.5) {
                     self.explosions.push(Explosion { pos: next, radius: p.radius, damage: p.damage, from_enemy: false, force: 22.0, spares_players: false, barrel: false });
                     return false;
                 }

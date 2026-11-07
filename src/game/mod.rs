@@ -137,6 +137,8 @@ pub struct World {
     pub game_over_timer: f32,
     pub core_alert: f32,
     pub listener: Vec3,
+    /// The camera's right-hand side, which is what left and right mean to the speakers.
+    pub listener_right: Vec3,
     pub nav_dirty: bool,
     pub nav_timer: f32,
     pub next_zombie_id: u32,
@@ -145,7 +147,7 @@ pub struct World {
     sfx_budget: [u8; crate::audio::sfx::SFX_COUNT],
     pub zhash_head: Vec<i32>,
     pub zhash_next: Vec<i32>,
-    pub hit_scratch: Vec<(f32, u32, f32)>,
+    pub hit_scratch: Vec<(f32, u32, bool)>,
     pub query_scratch: Vec<u32>,
     pub invincible: bool,
     pub sfx_gain: f32,
@@ -216,6 +218,7 @@ impl World {
             game_over_timer: 0.0,
             core_alert: 0.0,
             listener: Vec3::ZERO,
+            listener_right: Vec3::X,
             nav_dirty: true,
             nav_timer: 0.0,
             next_zombie_id: 1,
@@ -255,7 +258,7 @@ impl World {
             return;
         }
         self.sfx_budget[id as usize] += 1;
-        let pan = (d.x / 32.0).clamp(-0.85, 0.85);
+        let pan = (d.dot(self.listener_right) / 32.0).clamp(-0.85, 0.85);
         let pitch = self.rng.range(0.93, 1.07);
         self.audio.send(Cmd::Play { id, gain: gain * att * self.sfx_gain, pan, pitch });
     }

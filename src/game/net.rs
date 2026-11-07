@@ -21,7 +21,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
-pub const PROTOCOL: u16 = 3;
+pub const PROTOCOL: u16 = 4;
 pub const DEFAULT_PORT: u16 = 27416;
 pub const BEACON_PORT: u16 = 27417;
 const SNAP_INTERVAL: f32 = 1.0 / 30.0;
@@ -545,6 +545,7 @@ fn write_snapshot(world: &World, player: usize, complete: bool, known: &mut Hash
         w.q(p.respawn);
         w.unit(p.hurt);
         w.u8(p.respawn_seq);
+        w.q3(p.aim);
         if i == player {
             let mut owned = 0u32;
             for k in 0..18 {
@@ -713,7 +714,12 @@ fn apply_snapshot(w: &mut World, r: &mut Reader) -> Option<()> {
         let respawn = r.q()?;
         let hurt = r.unit()?;
         let seq = r.u8()?;
+        let aim = r.q3()?;
         let p = &mut w.players[i];
+        // Your own aim is your own; everyone else's is how their gun gets drawn.
+        if i != local {
+            p.aim = aim;
+        }
         let was_alive = p.alive;
         p.alive = f & 1 != 0;
         p.connected = f & 2 != 0;
@@ -2244,6 +2250,24 @@ mod tests {
         assert_eq!(cw.players[1].death_cause, DeathCause::Explosion);
         assert_eq!(cw.ragdolls.bodies.iter().filter(|b| b.owner == 1).count(), 1, "one body, not two");
         assert_eq!(cw.wave_track_for_test(), crate::audio::Track::Smitherines, "the client hears its own death");
+    }
+
+    #[test]
+    fn each_players_aim_reaches_the_others() {
+        let mut rig = Rig::new(ServerConfig::default());
+        rig.join("kay", "").unwrap();
+        rig.run(10);
+        let (host_aim, client_aim) = (vec3(12.0, 0.0, 5.0), vec3(-8.0, 5.0, 3.0));
+        let (host, client) = (PlayerInput { aim: host_aim, ..Default::default() }, PlayerInput { aim: client_aim, ..Default::default() });
+        for _ in 0..30 {
+            rig.step(host, client);
+            std::thread::sleep(Duration::from_micros(300));
+        }
+        // The height matters now: it is what the gun fires along, and how it gets drawn.
+        assert!(rig.host.players[1].aim.distance(client_aim) < 0.1, "host sees {}", rig.host.players[1].aim);
+        let (cw, _) = &rig.clients[0];
+        assert!(cw.players[0].aim.distance(host_aim) < 0.1, "client sees {}", cw.players[0].aim);
+        assert!(cw.players[1].aim.distance(client_aim) < 0.01, "a client keeps its own aim, not the echo");
     }
 
     #[test]

@@ -60,6 +60,13 @@ impl Zombie {
         Vec2::new(self.pos.x, self.pos.z)
     }
 
+    /// How tall the zombie is to a bullet. Never below gun height, so that level fire from a
+    /// sentry or a touchscreen still finds crawlers.
+    pub fn body_top(&self) -> f32 {
+        let low = self.crawling || self.kind == ZKind::Crawler;
+        (self.scale * if low { 1.3 } else { 1.9 }).max(1.35)
+    }
+
     /// Procedural pose. Walk cycles are driven by actual motion so feet do not slide much.
     pub fn pose(&self, t: f32) -> Pose {
         let s = self.scale;

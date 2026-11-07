@@ -48,6 +48,8 @@ const MASH_TIME: f32 = 0.2;
 const MIN_DOWN: f32 = 0.6;
 /// Damage multiplier against someone lying helpless on the ground.
 const DOWN_DAMAGE: f32 = 2.0;
+/// How steeply a gun can tip up or down, in radians.
+const MAX_PITCH: f32 = 1.15;
 
 pub struct Player {
     pub pos: Vec3,
@@ -176,9 +178,27 @@ impl Player {
         self.pos + vec3(0.0, 1.22, 0.0) + f * 0.42 + r * 0.14
     }
 
+    /// Which way the gun points: towards the aim, tipped up or down as far as arms can manage.
+    pub fn aim_dir(&self) -> Vec3 {
+        let to = self.aim - self.gun_origin();
+        let across = Vec2::new(to.x, to.z).length().max(0.01);
+        let (sin, cos) = to.y.atan2(across).clamp(-MAX_PITCH, MAX_PITCH).sin_cos();
+        vec3(self.facing.x * cos, sin, self.facing.y * cos)
+    }
+
     pub fn muzzle(&self) -> Vec3 {
-        let f = vec3(self.facing.x, 0.0, self.facing.y);
-        self.gun_origin() + f * WEAPONS[self.weapon].muzzle
+        self.gun_origin() + self.aim_dir() * WEAPONS[self.weapon].muzzle
+    }
+
+    /// The line from the muzzle to the exact aim point, which the gun's offset from the body's
+    /// center would otherwise miss by a little. Anything too close to line up gets the gun's own line.
+    pub fn shot_dir(&self) -> Vec3 {
+        let gun = self.aim_dir();
+        let to = self.aim - self.muzzle();
+        match to.try_normalize() {
+            Some(d) if to.length() > 0.6 && d.dot(gun) > 0.8 => d,
+            _ => gun,
+        }
     }
 
     pub fn add_ammo_fraction(&mut self, wi: usize, frac: f32) {
@@ -229,7 +249,7 @@ impl Player {
         let grip = self.gun_origin() - f * kick - Vec3::Y * (reload_dip + crouch);
         p[R_HAND] = grip;
         p[R_ELB] = two_bone(p[R_SHO], grip, 0.29, 0.27, r * 0.8 - Vec3::Y);
-        let off = if def.two_handed { grip + f * (def.muzzle * 0.55).min(0.42) - r * 0.02 + Vec3::Y * 0.02 } else { grip - r * 0.08 - f * 0.06 - Vec3::Y * 0.02 };
+        let off = if def.two_handed { grip + self.aim_dir() * (def.muzzle * 0.55).min(0.42) - r * 0.02 + Vec3::Y * 0.02 } else { grip - r * 0.08 - f * 0.06 - Vec3::Y * 0.02 };
         p[L_HAND] = off;
         p[L_ELB] = two_bone(p[L_SHO], off, 0.29, 0.27, -r * 0.8 - Vec3::Y);
         // Climbing up from wherever the ragdoll came to rest.
@@ -484,8 +504,10 @@ impl World {
         p.mag[wi] -= 1;
         p.cooldown = 1.0 / def.rate;
         p.recoil = (p.recoil + def.recoil).min(0.8);
-        let f2 = p.facing;
+        let aim = p.shot_dir();
         let from = p.muzzle();
+        // Flames, arcs and thrown things spread out at their own height, so they only take the heading.
+        let f2 = Vec2::new(aim.x, aim.z).try_normalize().unwrap_or(p.facing);
         let moving = (p.vel.length() / 6.0).min(1.0);
         let extra_spread = p.spread * 0.06 + moving * 0.012;
         p.spread = (p.spread + def.recoil * 1.2).min(1.0);
@@ -506,27 +528,29 @@ impl World {
         match def.fire {
             Fire::Hitscan { pellets, spread, pierce } => {
                 let fc = if wi == 5 { 0.75 } else { 1.0 };
-                self.fx.muzzle_flash(from, dir, 0.3 + pellets as f32 * 0.03 + def.kick * 0.5, vec3(1.0, 0.72, 0.36) * fc);
-                self.fx.casing(from - dir * def.muzzle * 0.8, right);
+                self.fx.muzzle_flash(from, aim, 0.3 + pellets as f32 * 0.03 + def.kick * 0.5, vec3(1.0, 0.72, 0.36) * fc);
+                self.fx.casing(from - aim * def.muzzle * 0.8, right);
                 let width = if wi == 17 { 0.14 } else if pierce > 4 { 0.05 } else { 0.022 };
                 for _ in 0..pellets {
                     let a = self.rng.range(-1.0, 1.0) * (spread + extra_spread);
-                    let d = rotate_y(dir, a);
+                    let d = rotate_y(aim, a);
                     let col = if wi == 17 { [4.0, 9.0, 20.0] } else { def.tracer };
                     self.hitscan(from, d, 60.0, def.damage, pierce, def.knock, def.gore, col, width);
                 }
                 if wi == 17 {
                     // The rail leaves an ionized trail.
                     for k in 0..16 {
-                        let q = from + dir * k as f32 * 2.0;
+                        let mut q = from + aim * k as f32 * 2.0;
+                        q.y = q.y.max(0.1);
                         self.fx.frost_puff(q, Vec3::Y * 0.4, 0.14, 0.6);
                     }
                     self.fx.light(from + dir * 10.0, 22.0, vec3(5.0, 12.0, 25.0), 0.2);
                 }
             }
             Fire::Explosive { speed, radius, arc } => {
-                self.fx.muzzle_flash(from, dir, 0.5, vec3(1.0, 0.7, 0.3));
-                self.spawn_explosive(from, dir, speed, radius, def.damage, arc, false);
+                self.fx.muzzle_flash(from, aim, 0.5, vec3(1.0, 0.7, 0.3));
+                // Rockets fly straight at the aim point; launcher grenades lob along their own arc.
+                self.spawn_explosive(from, if arc { dir } else { aim }, speed, radius, def.damage, arc, false);
             }
             Fire::Flame => self.flame_stream(from, dir, 7.5, def.damage, 0.5),
             Fire::Cryo => self.frost_stream(from, dir, 8.0, def.damage),
@@ -534,7 +558,7 @@ impl World {
                 self.fx.muzzle_flash(from, dir, 0.3, vec3(0.3, 0.6, 1.0));
                 self.tesla_arc(from, dir, 15.0, def.damage, chains);
             }
-            Fire::Beam => self.beam(from, dir, 34.0, def.damage),
+            Fire::Beam => self.beam(from, aim, 34.0, def.damage),
             Fire::Saw { bounces } => {
                 self.fx.muzzle_flash(from, dir, 0.25, vec3(1.0, 0.9, 0.6));
                 self.spawn_saw(from, dir, def.damage, bounces);

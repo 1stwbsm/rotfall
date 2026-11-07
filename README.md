@@ -30,7 +30,8 @@ are needed to build.
 | Input | Action |
 | --- | --- |
 | `WASD` / mouse | Move / aim |
-| `LMB` | Shoot |
+| `LMB` | Shoot at exactly what the cursor is over. Heads take double damage |
+| `RMB` | Hold and drag to turn the camera, double click to reset it |
 | `R` | Reload |
 | `Shift` | Sprint |
 | `Space` | Dodge roll (brief invulnerability) |

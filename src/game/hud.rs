@@ -670,10 +670,11 @@ fn help(app: &mut App, ui: &mut Ui) {
     let (x, y) = ((w - bw) * 0.5, (h - bh) * 0.5);
     ui.panel(x, y, bw, bh);
     ui.text_center(w * 0.5, y + 12.0 * s, 3.0 * s, "FIELD MANUAL", ACCENT);
-    let lines: [(&str, &str); 19] = [
+    let lines: [(&str, &str); 20] = [
         ("WASD", "MOVE"),
         ("MOUSE", "AIM"),
-        ("LMB", "SHOOT"),
+        ("LMB", "SHOOT AT THE CURSOR. HEADS TAKE DOUBLE DAMAGE"),
+        ("RMB HOLD / TWICE", "TURN THE CAMERA / RESET IT"),
         ("R", "RELOAD"),
         ("SHIFT", "SPRINT"),
         ("SPACE", "DODGE ROLL. MASH WHEN KNOCKED DOWN TO GET UP"),
@@ -1159,9 +1160,10 @@ fn page_manual(app: &mut App, ui: &mut Ui, x: f32, mut y: f32) {
     let s = ui.s;
     ui.text_shadow(x, y, 2.0 * s, "FIELD MANUAL", ACCENT);
     y += 24.0 * s;
-    let lines: [(&str, &str); 15] = [
+    let lines: [(&str, &str); 16] = [
         ("WASD / MOUSE", "MOVE / AIM"),
-        ("LMB", "SHOOT"),
+        ("LMB", "SHOOT AT THE CURSOR. HEADS TAKE DOUBLE"),
+        ("RMB HOLD / TWICE", "TURN THE CAMERA / RESET IT"),
         ("R", "RELOAD"),
         ("SHIFT / SPACE", "SPRINT / DODGE ROLL"),
         ("G", "GRENADE AT THE CURSOR"),
