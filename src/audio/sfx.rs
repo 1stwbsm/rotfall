@@ -321,27 +321,26 @@ fn generate(s: Sfx) -> Vec<f32> {
         }
         Buy => tones(&[(0.0, 0.06, 980.0), (0.05, 0.14, 1470.0)], 1),
         Denied => tones(&[(0.0, 0.1, 180.0), (0.1, 0.16, 140.0)], 1),
-        // The menu speaks the soundtrack's language: its pluck, its stab and its A minor.
+        // The menu speaks the soundtrack's language: its stab and its A minor.
         MenuHover => {
             let mut v = vec![0.0; len(0.06)];
             clack(&mut v, 0.0, 3600.0, 3.0, 0.09, 170.0, id);
             add_pluck(&mut v, 0.0, midi_hz(88.0), 0.04);
             v
         }
+        // A switch and two quick electronic notes: rising to go on, falling to go back.
         MenuSelect => {
-            let mut v = vec![0.0; len(0.7)];
-            clack(&mut v, 0.0, 2400.0, 1.2, 0.28, 120.0, id);
-            knock(&mut v, 0.0, 150.0, 34.0, 0.32);
-            add_pluck(&mut v, 0.0, midi_hz(69.0), 0.34);
-            add_pluck(&mut v, 0.035, midi_hz(76.0), 0.3);
+            let mut v = vec![0.0; len(0.13)];
+            clack(&mut v, 0.0, 3000.0, 1.5, 0.22, 280.0, id);
+            add_blip(&mut v, 0.0, midi_hz(81.0), 0.2);
+            add_blip(&mut v, 0.035, midi_hz(88.0), 0.22);
             v
         }
         MenuBack => {
-            let mut v = vec![0.0; len(0.7)];
-            clack(&mut v, 0.0, 1700.0, 1.2, 0.22, 130.0, id);
-            knock(&mut v, 0.0, 115.0, 30.0, 0.26);
-            add_pluck(&mut v, 0.0, midi_hz(76.0), 0.26);
-            add_pluck(&mut v, 0.05, midi_hz(69.0), 0.28);
+            let mut v = vec![0.0; len(0.13)];
+            clack(&mut v, 0.0, 2200.0, 1.5, 0.2, 280.0, id);
+            add_blip(&mut v, 0.0, midi_hz(84.0), 0.18);
+            add_blip(&mut v, 0.035, midi_hz(76.0), 0.2);
             v
         }
         MenuToggle => {
@@ -383,6 +382,17 @@ fn knock(out: &mut [f32], start: f32, hz: f32, decay: f32, gain: f32) {
         let t = i as f32 / SR;
         ph = (ph + hz * (1.0 + 0.6 * (-t * 70.0).exp()) / SR).fract();
         *o += sine(ph) * (-t * decay).exp() * gain;
+    }
+}
+
+/// A very short filtered pulse: the interface's own voice.
+fn add_blip(out: &mut [f32], start: f32, hz: f32, gain: f32) {
+    let (mut ph, mut f) = (0.0f32, Svf::default());
+    for (i, o) in out.iter_mut().skip(len(start)).enumerate() {
+        let t = i as f32 / SR;
+        let d = hz / SR;
+        ph = (ph + d).fract();
+        *o += f.process(pulse(ph, d, 0.35), 5200.0, 0.8).lp * (t / 0.001).min(1.0) * (-t * 75.0).exp() * gain;
     }
 }
 

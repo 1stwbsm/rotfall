@@ -4,6 +4,7 @@
     blender -b -P tools/menu_scene.py -- logo   OUT.png WIDTH HEIGHT SAMPLES FONT.ttf
     blender -b -P tools/menu_scene.py -- thumb  OUT.png WIDTH HEIGHT SAMPLES FONT.ttf
     blender -b -P tools/menu_scene.py -- icon   OUT.png WIDTH HEIGHT SAMPLES FONT.ttf
+    blender -b -P tools/menu_scene.py -- horde  OUT.png WIDTH HEIGHT SAMPLES FONT.ttf
 """
 import math
 import random
@@ -193,7 +194,9 @@ if MODE == "logo":
 if MODE == "icon":
     # One bold letter in front of the reactor's glow: the only thing that survives 16 pixels.
     scene.render.film_transparent = True
-    scene.view_settings.look = "AgX - Very High Contrast"
+    # AgX would bleach the glows towards white, and they need to stay blue and orange.
+    scene.view_settings.view_transform = "Standard"
+    scene.view_settings.look = "None"
     scene.view_settings.exposure = 0.0
     world = bpy.data.worlds.new("w")
     world.use_nodes = True
@@ -204,10 +207,33 @@ if MODE == "icon":
     h = ob.dimensions.y
     k = 1.0 / h
     ob.scale = (k, k, k)
-    # A glowing disc behind the letter, on a fully transparent background.
-    bm = bmesh.new()
-    cyl(bm, (0, 0.15, 0), (0, 0.14, 0), 0.74, 0.74, 64)
-    from_bm("glow", bm, material("glow", (0, 0, 0), 0.5, emit=(0.02, 0.42, 1.0), strength=0.62))
+    # Two glows behind the letter, fading out to the fully transparent background: the reactor at
+    # its top right corner, fire at its bottom left. Their centres and radii stay inside the frame.
+    def glow(name, at, radius, colour, strength):
+        mat = bpy.data.materials.new(name)
+        mat.use_nodes = True
+        nt = mat.node_tree
+        nt.nodes.clear()
+        coord = nt.nodes.new("ShaderNodeTexCoord")
+        grad = nt.nodes.new("ShaderNodeTexGradient")
+        grad.gradient_type = "QUADRATIC_SPHERE"
+        emit = nt.nodes.new("ShaderNodeEmission")
+        emit.inputs["Color"].default_value = (*colour, 1)
+        emit.inputs["Strength"].default_value = strength
+        mix = nt.nodes.new("ShaderNodeMixShader")
+        out = nt.nodes.new("ShaderNodeOutputMaterial")
+        nt.links.new(coord.outputs["Object"], grad.inputs["Vector"])
+        nt.links.new(grad.outputs["Fac"], mix.inputs[0])
+        nt.links.new(nt.nodes.new("ShaderNodeBsdfTransparent").outputs[0], mix.inputs[1])
+        nt.links.new(emit.outputs[0], mix.inputs[2])
+        nt.links.new(mix.outputs[0], out.inputs["Surface"])
+        bm = bmesh.new()
+        bmesh.ops.create_circle(bm, cap_ends=True, segments=64, radius=1.0, matrix=Matrix.Rotation(math.radians(90), 4, "X"))
+        o = from_bm(name, bm, mat)
+        o.location = at
+        o.scale = (radius, radius, radius)
+    glow("blue glow", (0.36, 0.2, 0.39), 0.39, (0.0, 0.3, 1.0), 1.0)
+    glow("fire glow", (-0.36, 0.25, -0.39), 0.39, (1.0, 0.22, 0.0), 1.0)
     cam = bpy.data.cameras.new("c")
     cam.type = "ORTHO"
     cam.ortho_scale = 1.56
@@ -216,8 +242,10 @@ if MODE == "icon":
     scene.camera = camo
     camo.location = (0, -6, 0)
     aim(camo, (0, 0, 0))
-    aim(light("AREA", (-2, -3, 2.5), 90, (1.0, 0.78, 0.5), size=2.5), (0, 0, 0))
-    aim(light("AREA", (2, -2, -1.5), 26, (1.0, 0.25, 0.08), size=2), (0, 0, 0))
+    # Plain light to keep the rust readable, then each glow's colour falling on its own corner.
+    aim(light("AREA", (0, -4, 0.5), 46, (1.0, 0.68, 0.42), size=3), (0, 0, 0))
+    aim(light("POINT", (0.75, -0.75, 0.8), 9, (0.0, 0.35, 1.0), size=0.2), (0.3, 0, 0.35))
+    aim(light("POINT", (-0.75, -0.75, -0.8), 9, (1.0, 0.25, 0.0), size=0.2), (-0.3, 0, -0.35))
     bpy.ops.render.render(write_still=True)
     sys.exit(0)
 
@@ -454,6 +482,9 @@ flame_volume = make_flame_volume()
 
 
 def car(x, y, yaw, burning=False):
+    # The walls stand here in the thumbnail, and need to be seen.
+    if MODE == "horde" and y < 20:
+        return
     bm = bmesh.new()
     box(bm, (0, 0, 0.62), (1.85, 4.3, 0.55))
     box(bm, (0, -0.3, 1.14), (1.5, 2.1, 0.5))
@@ -575,7 +606,7 @@ eye_me.materials.append(eye)
 
 def zombie(x, y, scale=1.0, face_jitter=0.5):
     # The thumbnail camera stands further up the street: nobody should block its lens.
-    if MODE == "thumb" and y < 12.5:
+    if MODE in ("thumb", "horde") and y < 12.5:
         return
     me, head = R.choice(variants)
     ob = bpy.data.objects.new("z", me)
@@ -589,7 +620,10 @@ def zombie(x, y, scale=1.0, face_jitter=0.5):
         e = bpy.data.objects.new("e", eye_me)
         e.parent = ob
         e.location = head + Vector((sx, 0.09, 0.015))
-        e.scale = (0.016, 0.012, 0.012)
+        # Small images need bigger eyes, or the crowd loses its glare.
+        # Further back they would only blur together.
+        k = (1.25 if y < 24 else 0.9) if MODE == "horde" else 1.0
+        e.scale = (0.016 * k, 0.012 * k, 0.012 * k)
         scene.collection.objects.link(e)
 
 
@@ -692,6 +726,26 @@ cam_ob.location = (-2.2, -1.4, 1.25)
 aim(cam_ob, (-3.2, 40, 6.0))
 cam_ob.rotation_euler.rotate_axis("Z", math.radians(-1.6))
 
+def lens_logo(width, top_margin=None):
+    """The logo rides in front of the lens, as real geometry lit by real lights. It spans this
+    fraction of the frame's width, centered, and sits this far below the top edge if asked."""
+    logo = rust_text("ROTFALL")
+    logo.parent = cam_ob
+    dist = 3.0
+    frame = 2.0 * dist * 18.0 / cam.lens
+    k = frame * width / logo.dimensions.x
+    logo.scale = (k, k, k)
+    y = 0.0
+    if top_margin is not None:
+        y = frame * H / W / 2 - frame * top_margin - logo.dimensions.y * k / 2
+    logo.location = (0, y, -dist)
+    for pos, power, colour, size in (((-1.2, 1.0, -1.2), 75, (1.0, 0.72, 0.42), 1.5), ((1.3, -0.8, -1.5), 14, (0.2, 0.85, 1.0), 1.2), ((0, 1.2, -4.2), 90, (1.0, 0.14, 0.05), 2.0)):
+        pos = (pos[0], pos[1] + y, pos[2])
+        l = light("AREA", pos, power, colour, size=size)
+        l.parent = cam_ob
+        l.rotation_euler = (Vector((0, y, -dist)) - Vector(pos)).to_track_quat("-Z", "Y").to_euler()
+
+
 if MODE == "thumb":
     # A tighter, centered framing: reactor and horde behind, the logo in the middle of the shot.
     square = W == H
@@ -705,18 +759,217 @@ if MODE == "thumb":
     for ob in bpy.data.objects:
         if ob.name.startswith(("flash", "tracer")):
             ob.hide_render = True
-    # The logo rides in front of the lens, as real geometry lit by real lights.
-    logo = rust_text("ROTFALL")
-    logo.parent = cam_ob
-    dist = 3.0
-    frame = 2.0 * dist * 18.0 / cam.lens
-    k = frame * (0.88 if square else 0.8) / logo.dimensions.x
-    logo.scale = (k, k, k)
-    logo.location = (0, 0 if not square else 0.0, -dist)
-    for pos, power, colour, size in (((-1.2, 1.0, -1.2), 75, (1.0, 0.72, 0.42), 1.5), ((1.3, -0.8, -1.5), 14, (0.2, 0.85, 1.0), 1.2), ((0, 1.2, -4.2), 90, (1.0, 0.14, 0.05), 2.0)):
-        l = light("AREA", pos, power, colour, size=size)
-        l.parent = cam_ob
-        l.rotation_euler = (Vector((0, 0, -dist)) - Vector(pos)).to_track_quat("-Z", "Y").to_euler()
+    lens_logo(0.88 if square else 0.8)
+
+if MODE == "horde":
+    # The last stand: the player, back to us on the reactor pad, and everything else coming for them.
+    cam.dof.use_dof = False
+    for ob in list(bpy.data.objects):
+        if ob.name.startswith(("barricade", "hazard", "flash", "tracer", "sentry", "puddles")):
+            bpy.data.objects.remove(ob)
+        elif ob.type == "LIGHT" and (ob.location - Vector((OX + 5.72, OY + 8.2, 1.95))).length < 0.01:
+            bpy.data.objects.remove(ob)
+    CX = 1.2                # The camera, the player and the reactor beam all share one line.
+    PY_ = 8.5
+    PX = CX + (RX - CX) * (PY_ - 2.0) / (RY - 2.0)
+    cam.lens = 23
+    cam_ob.location = (CX, 2.0, 3.5)
+    # Tilted down enough for the player's feet, and not so far as to lose the top of the reactor.
+    aim(cam_ob, (RX, RY, 3.5 - 116.0 * math.tan(math.radians(6.5))))
+
+    # The crowd, thickest where it pours through the gap in the walls.
+    for _ in range(260):
+        zombie(PX + R.uniform(-7.5, 7.5), R.uniform(13.2, 24))
+    for _ in range(620):
+        zombie(R.uniform(-17, 19), R.uniform(19, 50))
+    for x, k in ((-3.8, 1.55), (3.9, 1.7), (-0.9, 1.1), (0.9, 1.05)):
+        zombie(PX + x, 13.0 if abs(x) > 2 else 12.6, k, 0.15)
+
+    # ---- the reactor pad under the player's feet
+    plate = noisy("plate", (0.05, 0.055, 0.06), (0.14, 0.15, 0.16), scale=6, rough=(0.3, 0.6), metal=0.75, bump=0.2)
+    bm = bmesh.new()
+    cyl(bm, (PX, PY_, 0), (PX, PY_, 0.14), 4.6, 4.4, 8)
+    from_bm("pad", bm, plate)
+    ring_glow = material("pad ring", (0, 0, 0), 0.5, emit=(0.13, 0.75, 1.0), strength=14)
+    bm = bmesh.new()
+    for a in range(8):
+        a0, a1 = (a + 0.5) * math.tau / 8, (a + 1.5) * math.tau / 8
+        p0 = Vector((PX + math.cos(a0) * 4.0, PY_ + math.sin(a0) * 4.0, 0.15))
+        p1 = Vector((PX + math.cos(a1) * 4.0, PY_ + math.sin(a1) * 4.0, 0.15))
+        mid, d = (p0 + p1) / 2, p1 - p0
+        box(bm, mid, (d.length * 0.82, 0.13, 0.03), (0, 0, math.atan2(d.y, d.x)))
+    from_bm("pad ring", bm, ring_glow)
+    bm = bmesh.new()
+    for k in range(-5, 6):
+        box(bm, (PX + k * 0.62, PY_ - 3.15, 0.15), (0.28, 0.5, 0.02), (0, 0, 0.6))
+    from_bm("pad hazard", bm, hazard)
+    light("POINT", (PX, PY_, 0.7), 26, (0.13, 0.75, 1.0), size=2.5)
+
+    # ---- steel walls closing in from both sides, and the sentries on them
+    wall_steel = noisy("wall steel", (0.1, 0.11, 0.13), (0.26, 0.28, 0.31), scale=7, rough=(0.3, 0.6), metal=0.85, bump=0.25)
+    walls, stripes, heads, lamps, flashes, tracers = bmesh.new(), bmesh.new(), bmesh.new(), bmesh.new(), bmesh.new(), bmesh.new()
+    def wall_run(sign, sentries):
+        for i in range(6):
+            x = PX + sign * (7.2 + i * 1.98)
+            y = 13.6 - i * 0.62
+            yaw = sign * -0.3
+            box(walls, (x, y, 0.95), (1.92, 0.55, 1.9), (0, 0, yaw))
+            box(walls, (x, y, 1.95), (1.7, 0.36, 0.14), (0, 0, yaw))
+            # Hazard banding on the face toward the camera.
+            box(stripes, (x, y - 0.29, 0.36), (1.72, 0.03, 0.2), (0, 0, yaw))
+            if i in sentries:
+                # A base on the wall, twin barrels raking the crowd, and the green lamp from the game.
+                cyl(walls, (x, y, 2.0), (x, y, 2.45), 0.28, 0.2, 10)
+                tx, ty = x - sign * R.uniform(3.0, 5.0), R.uniform(30, 40)
+                d = (Vector((tx, ty, 0.6)) - Vector((x, y, 2.65))).normalized()
+                yaw_h = math.atan2(d.y, d.x) - math.pi / 2
+                box(heads, (x, y, 2.63), (0.62, 0.95, 0.42), (0, 0, yaw_h))
+                side = Vector((d.y, -d.x, 0)).normalized() * 0.12
+                for sgn in (-1, 1):
+                    a = Vector((x, y, 2.65)) + side * sgn + d * 0.4
+                    cyl(heads, a, a + d * 1.0, 0.05, 0.04, 8)
+                box(lamps, Vector((x, y, 2.85)) - d * 0.3, (0.2, 0.04, 0.05), (0, 0, yaw_h))
+                muzzle = Vector((x, y, 2.65)) + d * 1.5
+                for a in range(6):
+                    t_ = a / 6 * math.tau
+                    cyl(flashes, muzzle, muzzle + side.normalized() * math.cos(t_) * 0.26 + Vector((0, 0, math.sin(t_) * 0.26)) + d * 0.15, 0.04, 0.0, 5)
+                cyl(flashes, muzzle, muzzle + d * 1.0, 0.07, 0.0, 6)
+                light("POINT", muzzle + d * 0.3, 90, (1.0, 0.55, 0.2), size=0.15)
+                for k in range(2):
+                    a = muzzle + d * (2.4 + k * 5.5)
+                    cyl(tracers, a, a + d * 1.8, 0.018, 0.018, 5)
+    wall_run(-1, (0, 2))
+    wall_run(1, (0, 2))
+    from_bm("walls", walls, wall_steel)
+    from_bm("stripes", stripes, hazard)
+    from_bm("sentry heads", heads, wall_steel)
+    from_bm("sentry lamps", lamps, material("lamp", (0, 0, 0), 0.5, emit=(0.15, 1.0, 0.35), strength=45))
+    from_bm("flashes", flashes, material("flash glow", (0, 0, 0), 0.5, emit=(1.0, 0.58, 0.18), strength=60))
+    from_bm("tracers", tracers, material("tracer glow", (0, 0, 0), 0.5, emit=(1.0, 0.68, 0.3), strength=110))
+
+    # ---- the player: same colours as in the game, facing +Y, away from the camera
+    shirt = noisy("shirt", (0.05, 0.075, 0.035), (0.13, 0.17, 0.09), scale=14, rough=(0.7, 0.95), bump=0.3)
+    pants = noisy("pants", (0.018, 0.024, 0.016), (0.05, 0.06, 0.045), scale=14, rough=(0.75, 1.0), bump=0.3)
+    skin = material("skin", (0.3, 0.26, 0.17), 0.6)
+    gear = noisy("gear", (0.02, 0.022, 0.024), (0.07, 0.07, 0.07), scale=20, rough=(0.5, 0.8), metal=0.3, bump=0.3)
+    vs = [
+        (0.0, 0.0, 0.96), (0.02, 0.04, 1.25), (0.03, 0.07, 1.5), (0.04, 0.09, 1.66),
+        (-0.14, 0.0, 0.9), (-0.29, 0.1, 0.5), (-0.41, 0.04, 0.06),
+        (0.14, 0.0, 0.9), (0.24, -0.1, 0.5), (0.36, -0.2, 0.06),
+        (-0.24, 0.04, 1.43), (0.27, 0.04, 1.43),
+        (-0.02, 0.24, 1.15), (0.6, 0.22, 1.13),
+        (0.46, -0.03, 1.17), (0.4, 0.17, 1.13),
+    ]
+    edges = [(0, 1), (1, 2), (2, 3), (0, 4), (4, 5), (5, 6), (0, 7), (7, 8), (8, 9), (2, 10), (2, 11), (10, 12), (12, 13), (11, 14), (14, 15)]
+    radii = [0.16, 0.19, 0.07, 0.11, 0.1, 0.07, 0.06, 0.1, 0.07, 0.06, 0.065, 0.065, 0.05, 0.04, 0.05, 0.04]
+    me = bpy.data.meshes.new("player")
+    me.from_pydata(vs, edges, [])
+    ob = bpy.data.objects.new("player", me)
+    scene.collection.objects.link(ob)
+    ob.modifiers.new("skin", "SKIN")
+    layer = me.skin_vertices[0] if len(me.skin_vertices) else me.skin_vertices.new()
+    for i, rad in enumerate(radii):
+        layer.data[i].radius = (rad, rad)
+    layer.data[0].use_root = True
+    ob.modifiers.new("ss", "SUBSURF").levels = 2
+    dg = bpy.context.evaluated_depsgraph_get()
+    baked = bpy.data.meshes.new_from_object(ob.evaluated_get(dg))
+    bpy.data.objects.remove(ob)
+    for mat in (shirt, pants, skin):
+        baked.materials.append(mat)
+    for poly in baked.polygons:
+        poly.use_smooth = True
+        c = poly.center
+        poly.material_index = 1 if c.z < 0.92 else (2 if c.z > 1.54 or (c.z < 1.21 and c.y > 0.1) else 0)
+    # Scaled up a touch: this figure has to read at 302 pixels wide.
+    k = 1.14
+    place = Matrix.Translation((PX, PY_, 0.14)) @ Matrix.Scale(k, 4)
+    body = bpy.data.objects.new("player", baked)
+    body.matrix_world = place
+    scene.collection.objects.link(body)
+    def attach(name, bm, mat):
+        o = from_bm(name, bm, mat)
+        bpy.context.view_layer.update()
+        for ob_ in bpy.data.objects:
+            if ob_.name.startswith(name):
+                ob_.matrix_world = place
+    bm = bmesh.new()
+    box(bm, (0.02, -0.12, 1.26), (0.36, 0.16, 0.42))
+    box(bm, (0.02, -0.03, 1.2), (0.42, 0.3, 0.34))
+    box(bm, (-0.2, -0.05, 0.98), (0.1, 0.12, 0.16))
+    bmesh.ops.create_icosphere(bm, subdivisions=3, radius=0.135, matrix=Matrix.Translation((0.04, 0.07, 1.71)))
+    attach("playergear", bm, gear)
+    bm = bmesh.new()
+    box(bm, (0.02, -0.205, 1.34), (0.14, 0.012, 0.03))
+    attach("playerlamp", bm, material("pack lamp", (0, 0, 0), 0.5, emit=(0.15, 1.0, 0.35), strength=30))
+
+    # ---- the Vanguard, held low and angled out to the side
+    gunmetal = material("gunmetal", (0.3, 0.31, 0.33), 0.35, metal=0.85)
+    guard = material("guard", (0.16, 0.17, 0.15), 0.5, metal=0.4)
+    stock_at = Vector((0.2, -0.02, 1.24))
+    aim_dir = Vector((0.88, 0.42, -0.2)).normalized()
+    up = Vector((0, 0, 1))
+    side_v = aim_dir.cross(up).normalized()
+    top_v = side_v.cross(aim_dir).normalized()
+    basis = Matrix((side_v, aim_dir, top_v)).transposed().to_4x4()
+    # A little oversized, or it would be a smudge at this size.
+    rifle = Matrix.Translation(stock_at) @ basis @ Matrix.Scale(1.25, 4)
+    def part(bm, at, size):
+        bmesh.ops.create_cube(bm, size=1.0, matrix=rifle @ Matrix.Translation(at) @ Matrix.Diagonal((*size, 1)))
+    bm = bmesh.new()
+    part(bm, (0, 0.13, 0), (0.05, 0.26, 0.09))      # stock
+    part(bm, (0, 0.46, 0.0), (0.055, 0.42, 0.095))   # receiver
+    part(bm, (0, 0.5, 0.075), (0.025, 0.2, 0.05))    # sight rail
+    part(bm, (0, 1.14, 0.015), (0.022, 0.42, 0.022)) # barrel
+    part(bm, (0, 1.37, 0.015), (0.034, 0.07, 0.034)) # muzzle brake
+    part(bm, (0, 0.5, -0.12), (0.04, 0.1, 0.17))     # magazine
+    part(bm, (0, 0.27, -0.09), (0.04, 0.06, 0.11))   # grip
+    attach("playergun", bm, gunmetal)
+    bm = bmesh.new()
+    part(bm, (0, 0.82, 0.0), (0.06, 0.36, 0.08))     # handguard
+    attach("playerguard", bm, guard)
+
+    # Enough warm light from behind us to pull the figure out of the crowd.
+    l = light("SPOT", (PX + 1.0, PY_ - 4.5, 5.0), 900, (1.0, 0.8, 0.6), size=0.4)
+    l.data.spot_size = math.radians(24)
+    l.data.spot_blend = 0.5
+    aim(l, (PX, PY_, 1.2))
+    # And the reactor's colour along their edges, the outline that survives at 302 pixels.
+    light("POINT", (PX - 0.2, PY_ + 1.5, 2.5), 34, (0.13, 0.75, 1.0), size=0.2)
+    # Work lights along the base, so that the walls read as steel rather than as black shapes.
+    for sgn in (-1, 1):
+        w_ = light("AREA", (PX + sgn * 10, 5.0, 5.5), 420, (0.85, 0.9, 1.0), size=7)
+        aim(w_, (PX + sgn * 11, 12.0, 0.8))
+    # The horde's front rank, picked out by the player's flashlight.
+    spot = light("SPOT", (PX + 0.5, PY_ + 0.6, 1.9), 1100, (1.0, 0.88, 0.7), size=0.1)
+    aim(spot, (PX + 0.5, PY_ + 13, 1.0))
+    # Fires behind the walls keep the outer crowd from falling into black.
+    light("POINT", (PX - 9, 19, 4.0), 2400, (1.0, 0.45, 0.14), size=1.5)
+    light("POINT", (PX + 10, 21, 4.0), 2400, (1.0, 0.45, 0.14), size=1.5)
+    light("POINT", (PX, 15, 7), 500, (0.13, 0.75, 1.0), size=3)
+    lens_logo(0.46, 0.035)
 
 scene.cycles.volume_step_rate = 4.0
+if MODE == "horde":
+    # Rendered large and averaged down: crisper at thumbnail size than denoising it there.
+    scene.render.resolution_x, scene.render.resolution_y = W * 3, H * 3
 bpy.ops.render.render(write_still=True)
+if MODE == "horde":
+    img = bpy.data.images.load(OUT)
+    src = list(img.pixels)
+    W3, out = W * 3, [0.0] * (W * H * 4)
+    for y in range(H):
+        for x in range(W):
+            for c in range(3):
+                total = 0.0
+                for yy in range(3):
+                    row = (y * 3 + yy) * W3
+                    for xx in range(3):
+                        total += src[(row + x * 3 + xx) * 4 + c]
+                out[(y * W + x) * 4 + c] = total / 9.0
+            out[(y * W + x) * 4 + 3] = 1.0
+    small = bpy.data.images.new("thumbnail", W, H)
+    small.pixels = out
+    small.filepath_raw = OUT
+    small.file_format = "PNG"
+    small.save()

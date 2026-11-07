@@ -640,8 +640,8 @@ mod tests {
         check(Sfx::MenuHover, 0.1, 0.35);
         check(Sfx::MenuTick, 0.1, 0.5);
         check(Sfx::MenuToggle, 0.2, 0.8);
-        check(Sfx::MenuSelect, 0.8, 0.9);
-        check(Sfx::MenuBack, 0.8, 0.9);
+        check(Sfx::MenuSelect, 0.2, 0.7);
+        check(Sfx::MenuBack, 0.2, 0.7);
         check(Sfx::MenuError, 0.4, 0.95);
         check(Sfx::MenuConfirm, 2.0, 1.0);
     }
