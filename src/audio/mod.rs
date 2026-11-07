@@ -18,6 +18,8 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 pub enum Cmd {
     Play { id: Sfx, gain: f32, pan: f32, pitch: f32 },
     Music(Track),
+    /// Switch track with no fade.
+    MusicCut(Track),
     Intensity(f32),
     MusicVolume(f32),
     SfxVolume(f32),
@@ -84,6 +86,7 @@ impl Mixer {
                 self.voices.push(SfxVoice { id, pos: 0.0, rate: pitch, gl: gain * a.cos(), gr: gain * a.sin() });
             }
             Cmd::Music(t) => self.music.set_track(t),
+            Cmd::MusicCut(t) => self.music.cut_to(t),
             Cmd::Intensity(i) => self.music.set_intensity(i),
             Cmd::MusicVolume(v) => self.music.volume = v,
             Cmd::SfxVolume(v) => self.sfx_volume = v,
@@ -176,6 +179,13 @@ impl Audio {
         }
     }
 
+    /// A handle whose commands a test can read back.
+    #[cfg(test)]
+    pub fn capture() -> (Audio, Receiver<Cmd>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (Audio { tx: Some(tx) }, rx)
+    }
+
     pub fn send(&self, c: Cmd) {
         if let Some(t) = &self.tx {
             let _ = t.send(c);
@@ -195,10 +205,16 @@ fn web_audio(rx: Receiver<Cmd>) -> Result<(), wasm_bindgen::JsValue> {
     let mut stereo = vec![0.0f32; FRAMES as usize * 2];
     let mut left = vec![0.0f32; FRAMES as usize];
     let mut right = vec![0.0f32; FRAMES as usize];
+    let mut unlocked_once = false;
     let process = Closure::<dyn FnMut(web_sys::AudioProcessingEvent)>::new(move |e: web_sys::AudioProcessingEvent| {
+        // Browsers keep audio suspended until the first input, so anything played before then
+        // has piled up. Settings still apply, but those sounds must not all go off at once.
         while let Ok(c) = rx.try_recv() {
-            mixer.apply(c);
+            if unlocked_once || !matches!(c, Cmd::Play { .. }) {
+                mixer.apply(c);
+            }
         }
+        unlocked_once = true;
         mixer.render(&mut stereo);
         for (i, f) in stereo.chunks_exact(2).enumerate() {
             left[i] = f[0];
@@ -255,6 +271,35 @@ fn audio_thread(rx: Receiver<Cmd>) {
 
 /// Renders one soundtrack file a slice at a time, so that the game stays responsive even in a
 /// browser, where there are no threads to hide it on.
+/// How hard each track works the CPU, played through once at full intensity. The browser renders
+/// on the page's own thread in 2048 frame blocks, so its slowest block is what can cause a dropout.
+pub fn bench_music() -> String {
+    #[cfg(target_arch = "wasm32")]
+    use web_time::Instant;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::Instant;
+    const BLOCK: usize = 2048;
+    let budget = BLOCK as f64 / SR as f64 * 1000.0;
+    let mut report = format!("budget per block: {budget:.1} ms\n");
+    for track in Track::ALL {
+        let mut mixer = Mixer::music_only(track);
+        mixer.apply(Cmd::Intensity(1.0));
+        let mut buf = vec![0.0f32; BLOCK * 2];
+        let blocks = (track.loop_seconds() * SR / BLOCK as f32) as usize + 1;
+        let (mut total, mut worst) = (0.0f64, 0.0f64);
+        for _ in 0..blocks {
+            let t = Instant::now();
+            mixer.render(&mut buf);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            total += ms;
+            worst = worst.max(ms);
+        }
+        let average = total / blocks as f64;
+        report += &format!("{:<28} {:>4} blocks  avg {average:>5.2} ms ({:>3.0}%)  worst {worst:>5.2} ms ({:>3.0}%)\n", track.name(), blocks, average / budget * 100.0, worst / budget * 100.0);
+    }
+    report
+}
+
 pub struct OstRender {
     pub track: Track,
     mixer: Mixer,
@@ -415,16 +460,20 @@ mod tests {
     fn every_melody_note_parses() {
         for t in TRACKS {
             for s in song(t).sections {
-                for tok in s.lead.split_whitespace() {
+                for tok in s.lead.split_whitespace().chain(s.counter.split_whitespace()).chain(s.horn.split_whitespace()) {
                     let n = tok.split(':').next().unwrap();
                     assert!(n == "-" || parse_note(n).is_some(), "bad note {tok} in {t:?}");
                     assert!(tok.split(':').nth(1).and_then(|v| v.parse::<u32>().ok()).is_some(), "bad len {tok}");
                 }
-                for p in [s.kick, s.snare, s.hat, s.bass, s.arp, s.stab] {
+                for p in [s.kick, s.snare, s.hat, s.ride, s.bass, s.acid, s.arp, s.low, s.timp, s.boom, s.stab] {
                     assert!(p.is_empty() || p.len() == 16, "pattern `{p}` in {t:?} is not 16 steps");
                 }
             }
         }
+    }
+
+    fn lines_of(s: &Section) -> [(&'static str, &'static str); 3] {
+        [("lead", s.lead), ("counter", s.counter), ("horn", s.horn)]
     }
 
     #[test]
@@ -432,37 +481,58 @@ mod tests {
         for t in TRACKS {
             for (si, s) in song(t).sections.iter().enumerate() {
                 let bars = s.chords.split_whitespace().count() as u32;
-                let total: u32 = s.lead.split_whitespace().map(|tok| tok.split(':').nth(1).unwrap().parse::<u32>().unwrap()).sum();
-                assert_eq!(total % (bars * 16), 0, "{t:?} section {si}: melody is {total} steps over {bars} bars");
+                for (name, line) in lines_of(s) {
+                    let total: u32 = line.split_whitespace().map(|tok| tok.split(':').nth(1).unwrap().parse::<u32>().unwrap()).sum();
+                    assert_eq!(total % (bars * 16), 0, "{t:?} section {si} {name}: {total} steps over {bars} bars");
+                }
             }
         }
     }
 
-    /// Fraction of melody time spent on chord tones or the song's scale; prints a report.
+    /// Fraction of melody time on chord tones. Reports every line, and fails on real clashes.
     #[test]
     fn melodies_stay_consonant() {
         for t in TRACKS {
             let (mut chord_time, mut total_time) = (0u32, 0u32);
-            for s in song(t).sections {
+            for (si, s) in song(t).sections.iter().enumerate() {
                 let chords: Vec<_> = s.chords.split_whitespace().map(parse_chord).collect();
-                let mut step = 0u32;
-                for tok in s.lead.split_whitespace() {
-                    let mut it = tok.split(':');
-                    let (n, l) = (it.next().unwrap(), it.next().unwrap().parse::<u32>().unwrap());
-                    if let Some(note) = parse_note(n) {
-                        let (root, tones) = chords[((step / 16) as usize) % chords.len()];
-                        let pc = (note - root).rem_euclid(12.0);
-                        total_time += l;
-                        if tones.iter().any(|x| (x.rem_euclid(12.0) - pc).abs() < 0.01) {
-                            chord_time += l;
+                for (name, line) in lines_of(s) {
+                    let (mut on, mut all, mut step) = (0, 0, 0u32);
+                    for tok in line.split_whitespace() {
+                        let mut it = tok.split(':');
+                        let (n, l) = (it.next().unwrap(), it.next().unwrap().parse::<u32>().unwrap());
+                        if let Some(note) = parse_note(n) {
+                            let (root, tones) = chords[((step / 16) as usize) % chords.len()];
+                            let pc = (note - root).rem_euclid(12.0);
+                            all += l;
+                            if tones.iter().any(|x| (x.rem_euclid(12.0) - pc).abs() < 0.01) {
+                                on += l;
+                            }
                         }
+                        step += l;
                     }
-                    step += l;
+                    chord_time += on;
+                    total_time += all;
+                    // Support lines exist to hold the harmony together, so they are held to more.
+                    if name != "lead" && all > 0 {
+                        assert!(on * 10 >= all * 8, "{t:?} section {si} {name} is only {on}/{all} on chord tones");
+                    }
                 }
             }
             let ratio = chord_time as f32 / total_time.max(1) as f32;
             println!("{t:?}: {:.0}% of melody time on chord tones", ratio * 100.0);
             assert!(ratio > 0.45, "{t:?} melody clashes with its harmony: {ratio}");
+        }
+    }
+
+    #[test]
+    fn every_section_sits_in_a_song_that_loops_cleanly() {
+        for t in TRACKS {
+            let s = song(t);
+            assert!(s.loop_to < s.sections.len(), "{t:?}");
+            for sec in s.sections {
+                assert!(!sec.chords.is_empty() && sec.repeats > 0 && (0.0..=1.0).contains(&sec.energy), "{t:?}");
+            }
         }
     }
 
@@ -513,6 +583,35 @@ mod tests {
     }
 
     #[test]
+    fn death_music_and_previews_cut_in_at_once() {
+        let mut m = Music::new(Track::Boss);
+        let mut b = vec![0.0; 88200];
+        m.render_add(&mut b);
+        let mut after = vec![0.0; 2 * 512];
+        // However it is asked for, a death track takes over within a dozen milliseconds.
+        m.set_track(Track::Rot);
+        m.render_add(&mut after);
+        assert_eq!(m.track(), Track::Rot);
+        assert!(!m.is_crossfading(), "nothing of the old track may linger");
+        assert!(after.iter().all(|x| x.is_finite() && x.abs() < 2.0));
+        // Asking again, as the game does every frame, must not restart it.
+        let before = m.position();
+        m.set_track(Track::Rot);
+        m.render_add(&mut b);
+        assert!(m.position() > before, "restarted");
+        // Leaving a death track still fades, as nobody asked for that to be sudden.
+        m.set_track(Track::Build);
+        m.render_add(&mut after);
+        assert!(m.is_crossfading());
+        assert_eq!(m.track(), Track::Build);
+        // The soundtrack page cuts between anything, in any direction.
+        m.cut_to(Track::CombatA);
+        m.render_add(&mut after);
+        assert_eq!(m.track(), Track::CombatA);
+        assert!(!m.is_crossfading());
+    }
+
+    #[test]
     fn crossfade_between_tracks_is_clean() {
         let mut m = Music::new(Track::Build);
         let mut b = vec![0.0; 44100];
@@ -523,6 +622,28 @@ mod tests {
             assert!(b.iter().all(|x| x.is_finite()));
         }
         assert_eq!(m.track(), Track::Boss);
+    }
+
+    #[test]
+    fn menu_sounds_stay_under_the_music() {
+        let bank = sfx::build_bank();
+        let check = |id: Sfx, max_secs: f32, max_peak: f32| {
+            let v = &bank[id as usize];
+            let peak = v.iter().fold(0.0f32, |p, x| p.max(x.abs()));
+            let secs = v.len() as f32 / dsp::SR;
+            println!("{id:?}: {secs:.2} s, peak {peak:.2}, rms {:.3}", rms(v));
+            assert!(secs <= max_secs && peak <= max_peak, "{id:?}: {secs} s, peak {peak}");
+            // No click at the end of the sound.
+            assert!(v[v.len() - 1].abs() < 0.05, "{id:?} ends abruptly");
+        };
+        // Passed over constantly, so it has to be barely there.
+        check(Sfx::MenuHover, 0.1, 0.35);
+        check(Sfx::MenuTick, 0.1, 0.5);
+        check(Sfx::MenuToggle, 0.2, 0.8);
+        check(Sfx::MenuSelect, 0.8, 0.9);
+        check(Sfx::MenuBack, 0.8, 0.9);
+        check(Sfx::MenuError, 0.4, 0.95);
+        check(Sfx::MenuConfirm, 2.0, 1.0);
     }
 
     #[test]

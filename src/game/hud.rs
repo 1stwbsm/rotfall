@@ -23,6 +23,9 @@ pub struct Ui<'a> {
     pub typed: Vec<char>,
     pub backspace: bool,
     pub time: f32,
+    /// Whichever control the pointer is over, and the sounds asked for this frame.
+    pub hot: u64,
+    pub sounds: Vec<(Sfx, f32, f32)>,
 }
 
 const VERSION: &str = concat!("V", env!("CARGO_PKG_VERSION"));
@@ -37,6 +40,21 @@ const PANEL_HI: C = [0.16, 0.14, 0.09, 0.92];
 const BLUE: C = [0.35, 0.8, 1.0, 1.0];
 
 impl Ui<'_> {
+    /// Controls have no identity between frames, but they do stay in one place.
+    pub fn mark_hot(&mut self, x: f32, y: f32) {
+        self.hot = ((x.round() as i32 as u32 as u64) << 32 | (y.round() as i32 as u32 as u64)) + 1;
+    }
+
+    pub fn sound(&mut self, id: Sfx, gain: f32) {
+        self.sounds.push((id, gain, 1.0));
+    }
+
+    /// Leaving a page is a different gesture from going deeper, and should sound like one.
+    fn press_sound(&mut self, label: &str) {
+        let back = ["BACK", "CLOSE", "CANCEL"].iter().any(|b| label.starts_with(b));
+        self.sound(if back { Sfx::MenuBack } else { Sfx::MenuSelect }, 0.8);
+    }
+
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, c: C) {
         let uv = font::solid_uv();
         let v = |px, py| UiVertex { pos: [px, py], uv, color: c };
@@ -108,6 +126,16 @@ impl Ui<'_> {
         let hover = self.hovered(x, y, w, h);
         if hover {
             self.over = true;
+            if enabled {
+                self.mark_hot(x, y);
+            }
+            if self.click {
+                if enabled {
+                    self.press_sound(label);
+                } else {
+                    self.sound(Sfx::MenuError, 0.7);
+                }
+            }
         }
         self.rect(x, y, w, h, if hover && enabled { PANEL_HI } else { PANEL });
         self.frame_rect(x, y, w, h, 2.0, if hover && enabled { ACCENT } else { [0.4, 0.38, 0.3, 0.8] });
@@ -154,7 +182,8 @@ pub fn draw(app: &mut App, frame: &mut FrameData, raw: &RawInput, size: (u32, u3
     let typed = raw.typed.clone();
     let backspace = raw.hit(winit::keyboard::KeyCode::Backspace);
     let time = app.menu_t;
-    let mut ui = Ui { out: &mut frame.ui, w, h, s, mx: raw.mouse.0, my: raw.mouse.1, click, over: false, typed, backspace, time };
+    let mut ui = Ui { out: &mut frame.ui, w, h, s, mx: raw.mouse.0, my: raw.mouse.1, click, over: false, typed, backspace, time, hot: 0, sounds: Vec::new() };
+    let had_action = app.action.is_some();
     match app.screen {
         Screen::Title => title(app, &mut ui),
         Screen::Playing => {
@@ -195,6 +224,12 @@ pub fn draw(app: &mut App, frame: &mut FrameData, raw: &RawInput, size: (u32, u3
         ui.text_shadow(8.0, h - 18.0, 1.0, &t, WHITE);
     }
     app.ui_over = ui.over;
+    let (hot, mut sounds) = (ui.hot, std::mem::take(&mut ui.sounds));
+    // Starting a run brings its own sound as the action is carried out.
+    if !had_action && app.action.is_some() {
+        sounds.clear();
+    }
+    app.menu_sounds(hot, raw.mouse, &sounds);
 }
 
 fn cursor(app: &App, ui: &mut Ui) {
@@ -382,7 +417,8 @@ fn ingame(app: &mut App, ui: &mut Ui) {
         death_scene(world, ui);
     } else if p.down_t > 0.0 {
         ui.text_center(cx, h * 0.68, 3.0 * s, "KNOCKED DOWN", [1.0, 0.6, 0.2, 1.0]);
-        ui.text_center(cx, h * 0.68 + 30.0 * s, 1.0 * s, "YOU ARE HELPLESS UNTIL YOU GET UP", WHITE);
+        let prompt = if app.touch.enabled { "HELPLESS! MASH ROLL TO GET UP FASTER" } else { "HELPLESS! MASH SPACE TO GET UP FASTER" };
+        ui.text_center(cx, h * 0.68 + 30.0 * s, 1.0 * s, prompt, WHITE);
     }
     if world.permadeath {
         ui.text_shadow(m + 8.0 * s, m + 54.0 * s, 1.0 * s, "PERMADEATH", RED);
@@ -486,6 +522,9 @@ fn build_bar(app: &mut App, ui: &mut Ui) {
         let locked = d.unlock_wave > wave;
         let afford = app.world.scrap >= d.cost;
         let hover = ui.hovered(x, y0, slot - 4.0, 78.0 * s);
+        if hover {
+            ui.mark_hot(x, y0);
+        }
         ui.rect(x, y0, slot - 4.0, 78.0 * s, if i == sel { PANEL_HI } else if hover { [0.11, 0.11, 0.1, 0.9] } else { [0.03, 0.03, 0.035, 0.85] });
         ui.frame_rect(x, y0, slot - 4.0, 78.0 * s, if i == sel { 2.0 } else { 1.0 }, if i == sel { ACCENT } else { [0.3, 0.3, 0.27, 0.7] });
         if i < 10 {
@@ -552,6 +591,9 @@ fn armory(app: &mut App, ui: &mut Ui) {
         let locked = !owned && def.unlock_wave > wave;
         let current = app.world.me().weapon == i;
         let hover = ui.hovered(x, y, bw, bh);
+        if hover {
+            ui.mark_hot(x, y);
+        }
         ui.rect(x, y, bw, bh, if current { PANEL_HI } else if hover { [0.11, 0.11, 0.1, 0.92] } else { [0.03, 0.03, 0.035, 0.88] });
         ui.frame_rect(x, y, bw, bh, if current { 2.0 } else { 1.0 }, if current { ACCENT } else { [0.3, 0.3, 0.27, 0.7] });
         ui.text(x + 8.0 * s, y + 6.0 * s, 2.0 * s, def.name, if locked { DIM } else { WHITE });
@@ -607,6 +649,8 @@ fn armory(app: &mut App, ui: &mut Ui) {
     let by = top + rows as f32 * ch + 8.0 * s;
     let label = format!("BUY 2 GRENADES (120)  HOLDING {}", app.world.me().grenades);
     if ui.button(x0, by, 360.0 * s, 32.0 * s, &label, 1.0 * s, true) {
+        // Buying has its own sounds, for hit and for miss.
+        ui.sounds.clear();
         if let Err(e) = app.do_cmd(Command::BuyGrenades) {
             app.ui_note = Some((e, 1.5));
             app.world.snd_ui(Sfx::Denied, 0.7);
@@ -632,7 +676,7 @@ fn help(app: &mut App, ui: &mut Ui) {
         ("LMB", "SHOOT"),
         ("R", "RELOAD"),
         ("SHIFT", "SPRINT"),
-        ("SPACE", "DODGE ROLL (BRIEF INVULNERABILITY)"),
+        ("SPACE", "DODGE ROLL. MASH WHEN KNOCKED DOWN TO GET UP"),
         ("G", "THROW GRENADE AT THE CURSOR"),
         ("1-9, WHEEL, Q/E", "SWITCH WEAPON"),
         ("F", "FLASHLIGHT"),
@@ -693,6 +737,10 @@ fn menu_item(ui: &mut Ui, x: f32, y: f32, w: f32, h: f32, label: &str, sub: &str
     let hover = ui.hovered(x, y, w, h) && enabled;
     if hover {
         ui.over = true;
+        ui.mark_hot(x, y);
+        if ui.click {
+            ui.press_sound(label);
+        }
         ui.rect(x, y, w, h, [0.5, 0.24, 0.06, 0.28]);
         ui.rect(x, y, 4.0 * s, h, ACCENT);
     } else {
@@ -718,8 +766,10 @@ fn field(ui: &mut Ui, focus: &mut Option<u8>, id: u8, x: f32, y: f32, w: f32, la
     let hover = ui.hovered(x, by, w, h);
     if hover {
         ui.over = true;
+        ui.mark_hot(x, by);
         if ui.click {
             *focus = Some(id);
+            ui.sound(Sfx::MenuTick, 0.8);
         }
     }
     let focused = *focus == Some(id);
@@ -727,10 +777,12 @@ fn field(ui: &mut Ui, focus: &mut Option<u8>, id: u8, x: f32, y: f32, w: f32, la
         for c in std::mem::take(&mut ui.typed) {
             if !c.is_control() && c.is_ascii() && value.chars().count() < max {
                 value.push(c);
+                // Keys never sound quite alike.
+                ui.sounds.push((Sfx::MenuTick, 0.45, 0.92 + (c as u32 % 7) as f32 * 0.03));
             }
         }
-        if ui.backspace {
-            value.pop();
+        if ui.backspace && value.pop().is_some() {
+            ui.sounds.push((Sfx::MenuTick, 0.45, 0.8));
         }
     }
     ui.rect(x, by, w, h, [0.02, 0.02, 0.025, 0.88]);
@@ -752,6 +804,7 @@ fn toggle(ui: &mut Ui, x: f32, y: f32, w: f32, label: &str, on: &mut bool) -> bo
     let hover = ui.hovered(x, y, w, h);
     if hover {
         ui.over = true;
+        ui.mark_hot(x, y);
     }
     let bx = 16.0 * s;
     ui.rect(x, y + 3.0 * s, bx, bx, [0.02, 0.02, 0.025, 0.88]);
@@ -762,6 +815,8 @@ fn toggle(ui: &mut Ui, x: f32, y: f32, w: f32, label: &str, on: &mut bool) -> bo
     ui.text_shadow(x + bx + 8.0 * s, y + 7.0 * s, 1.0 * s, label, WHITE);
     if hover && ui.click {
         *on = !*on;
+        // The same switch, thrown the other way.
+        ui.sounds.push((Sfx::MenuToggle, 0.8, if *on { 1.0 } else { 0.84 }));
         return true;
     }
     false
@@ -775,8 +830,10 @@ fn slider(ui: &mut Ui, x: f32, y: f32, w: f32, label: &str, value: &mut f32) -> 
     let hover = ui.hovered(x, by - 3.0, w, h + 6.0);
     if hover {
         ui.over = true;
+        ui.mark_hot(x, by);
         if ui.click {
             *value = ((ui.mx - x) / w).clamp(0.0, 1.0);
+            ui.sound(Sfx::MenuTick, 0.8);
             return true;
         }
     }

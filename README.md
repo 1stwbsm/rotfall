@@ -63,7 +63,7 @@ You can still suspend a run by quitting and resume it later.
 for It Is Over*. If zombies killed you, your old body gets back up as one of them when you redeploy.
 
 **Explosions** throw you off your feet. Until you get up you can't move or shoot, and everything hits you
-twice as hard, so one blast often leads to another.
+twice as hard, so one blast often leads to another. Mash `Space` (ROLL on a touchscreen) to get up faster.
 
 **Co-op, for up to 8 players.** Everyone shares the scrap, the base and the reactor. The horde
 hunts whoever is closest.
@@ -137,7 +137,7 @@ zip.
 | --- | --- |
 | `src/render/` | **Custom renderer.** wgpu is used only as the GPU API. Forward HDR shading with a CPU-binned world-space light grid, sun and flashlight shadow maps, instancing, MSAA, a persistent world-space decal layer, billboard particles, a bloom pyramid, tonemapping, and a bitmap-font UI batcher. All meshes are built procedurally in `mesh.rs`. |
 | `src/ragdoll.rs` | **Custom ragdoll engine.** Position-based dynamics on a 16-joint skeleton, with joint limits, torso bracing, breakable limbs, partial bodies, static collision, pile-ups and sleeping. Living characters are posed on the same skeleton, so death hands over with no visible pop. |
-| `src/audio/` | **Soundtrack and SFX.** Seven original tracks written as note data and synthesized live, with layers that follow the battle's intensity. All effects are synthesized at startup. Output goes through a small runtime-loaded ALSA binding. |
+| `src/audio/` | **Soundtrack and SFX.** Eleven original tracks of orchestral techno, written as note data and synthesized live with no samples: bowed strings, brass, choir, a plucked-string harp, piano, tubular bells and timpani in a modelled concert hall, over a techno kit and bass. Layers follow the battle's intensity. All effects, including the menu sounds, are synthesized at startup. Output goes through a small runtime-loaded ALSA binding. |
 | `src/game/` | Simulation: flow-field navigation, zombie AI, combat, base building, waves, HUD, and a bot that plays the game. `net.rs` is the co-op protocol and `save.rs` the save format. |
 | `tools/menu_scene.py` | **Art.** A Blender scene built entirely from script: the menu background and logo, the thumbnails in `assets/`, and the icon. `tools/render_menu_art.sh` re-renders them all. |
 
@@ -183,6 +183,7 @@ rotfall --capture out --times 6 --screen armory         # also: title, build, he
 rotfall --capture host --times 40 --host --port 27511 --wave 8   # a bot hosts a real server
 rotfall --capture guest --times 30 --connect 127.0.0.1:27511     # a scripted client joins it
 rotfall --bench 15 --wave 14 --size 1920x1080           # sim and GPU timing on this machine
+rotfall --bench-music                                   # music CPU cost, track by track (?bench-music in a browser)
 rotfall --render-music boss 60 1.0 boss.wav             # menu|build|a|b|c|boss|over SECS INTENSITY FILE
 ```
 

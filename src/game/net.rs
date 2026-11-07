@@ -21,7 +21,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
-pub const PROTOCOL: u16 = 2;
+pub const PROTOCOL: u16 = 3;
 pub const DEFAULT_PORT: u16 = 27416;
 pub const BEACON_PORT: u16 = 27417;
 const SNAP_INTERVAL: f32 = 1.0 / 30.0;
@@ -934,6 +934,10 @@ pub fn update_client(w: &mut World, dt: f32, input: &PlayerInput) {
         if input.toggle_light {
             w.players[local].flashlight = !w.players[local].flashlight;
         }
+        if input.dodge && w.players[local].alive && w.players[local].down_t > 0.0 {
+            // The host decides when you get up. This is only how it feels from here.
+            w.struggle(local);
+        }
         let busy = w.players[local].down_t > 0.0 || w.players[local].getup_t > 0.0;
         if w.players[local].alive && !busy {
             let p = &mut w.players[local];
@@ -1334,6 +1338,7 @@ impl Server {
                     c.ping_ms = (rtt * 1000.0) as u16;
                 }
                 let p = world.players.get_mut(idx)?;
+                let down = p.alive && p.down_t > 0.0;
                 // Ignore stale positions sent before the client heard about a respawn.
                 if p.alive && p.down_t <= 0.0 && p.getup_t <= 0.0 && seq == p.respawn_seq {
                     let lim = super::map::HALF - 1.0;
@@ -1351,6 +1356,8 @@ impl Server {
                 // One-shot actions latch until the simulation has seen them.
                 i.reload |= f & 4 != 0;
                 i.grenade |= f & 16 != 0;
+                // Only means anything on the ground: rolling is the client's own business.
+                i.dodge |= f & 32 != 0 && down;
                 if select != 255 {
                     i.select = Some(select as usize);
                 }
@@ -1382,6 +1389,7 @@ impl Server {
                     inputs[p] = c.input;
                     c.input.reload = false;
                     c.input.grenade = false;
+                    c.input.dodge = false;
                     c.input.select = None;
                     c.input.cycle = 0;
                 }
@@ -1713,6 +1721,7 @@ impl Client {
         let i = &mut self.pending;
         i.reload |= input.reload;
         i.grenade |= input.grenade;
+        i.dodge |= input.dodge;
         if input.select.is_some() {
             i.select = input.select;
         }
@@ -1733,7 +1742,7 @@ impl Client {
         w.q2(p.pos2());
         w.q2(p.vel);
         w.q3(input.aim);
-        let flags = u8::from(input.fire) | u8::from(input.sprint) << 1 | u8::from(self.pending.reload) << 2 | u8::from(p.roll_t > 0.0) << 3 | u8::from(self.pending.grenade) << 4;
+        let flags = u8::from(input.fire) | u8::from(input.sprint) << 1 | u8::from(self.pending.reload) << 2 | u8::from(p.roll_t > 0.0) << 3 | u8::from(self.pending.grenade) << 4 | u8::from(self.pending.dodge) << 5;
         w.u8(flags);
         w.u8(self.pending.select.map_or(255, |s| s.min(254) as u8));
         w.u8(self.pending.cycle.clamp(-1, 1) as i8 as u8);
@@ -2208,6 +2217,15 @@ mod tests {
         }
         assert!(rig.host.players[1].down_t > 0.0);
         assert!(rig.host.players[1].pos.distance(before) < 5.0);
+        // Mashing is the client's way out, and it has to reach the host.
+        let left = rig.host.players[1].down_t;
+        let mash = PlayerInput { dodge: true, aim: vec3(50.0, 1.2, 5.0), ..Default::default() };
+        rig.step(PlayerInput::default(), mash);
+        for _ in 0..6 {
+            rig.step(PlayerInput::default(), PlayerInput::default());
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        assert!(left - rig.host.players[1].down_t > 0.15, "the press never arrived: {} then {}", left, rig.host.players[1].down_t);
         // Then up again, everywhere, with both machines agreeing where.
         rig.host.players[1].down_t = 0.01;
         rig.run(60);

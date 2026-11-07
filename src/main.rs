@@ -57,6 +57,7 @@ struct Options {
     autoplay: bool,
     force_touch: bool,
     export_ost: Option<String>,
+    bench_music: bool,
 }
 
 fn start_seed() -> u64 {
@@ -90,6 +91,7 @@ fn parse_args() -> Options {
         autoplay: false,
         force_touch: false,
         export_ost: None,
+        bench_music: false,
     };
     #[cfg(not(target_arch = "wasm32"))]
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -118,6 +120,7 @@ fn parse_args() -> Options {
             "--autoplay" => o.autoplay = true,
             "--touch" => o.force_touch = true,
             "--export-ost" => o.export_ost = Some(next(&mut i)),
+            "--bench-music" => o.bench_music = true,
             "--capture" => o.capture = Some(next(&mut i)),
             "--times" => o.times = next(&mut i).split(',').filter_map(|t| t.parse().ok()).collect(),
             "--wave" => o.wave = next(&mut i).parse().unwrap_or(1),
@@ -160,6 +163,7 @@ fn parse_args() -> Options {
                 println!("Tools: --capture PREFIX --times 5,20 --wave N --scrap N --size WxH --screen play|title|build|armory|help|menu_new|menu_multi|menu_host|menu_join|menu_records|menu_options|menu_manual|pause");
                 println!("       --capture with --host [--port N] or --connect ADDR [--name X] plays a real network session");
                 println!("       --bench SECONDS --wave N    (GPU and simulation timing on the current machine)");
+                println!("       --bench-music               (music CPU cost, track by track)");
                 println!("       --render-music menu|build|a|b|c|boss|over SECONDS INTENSITY OUT.wav");
                 std::process::exit(0);
             }
@@ -898,12 +902,22 @@ fn main() {
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().collect();
-        let cli = ["--server", "--capture", "--bench", "--render-music", "--help", "-h"];
+        let cli = ["--server", "--capture", "--bench", "--bench-music", "--render-music", "--help", "-h"];
         if args.iter().any(|a| cli.contains(&a.as_str())) {
             win::console();
         }
     }
     let o = parse_args();
+    if o.bench_music {
+        let report = audio::bench_music();
+        // A page has no terminal, so the report stays where a script can read it.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(w) = web_sys::window() {
+            let _ = js_sys::Reflect::set(&w, &"musicBench".into(), &report.as_str().into());
+        }
+        print!("{report}");
+        return;
+    }
     if let Some((t, secs, inten, out)) = &o.render_music {
         let track = match t.as_str() {
             "menu" => Track::Menu,

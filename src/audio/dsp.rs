@@ -85,6 +85,10 @@ impl Delay {
     pub fn new(max: usize) -> Self {
         Delay { buf: vec![0.0; max.max(1)], idx: 0, len: max.max(1) }
     }
+    pub fn clear(&mut self) {
+        self.buf.fill(0.0);
+    }
+
     pub fn set_len(&mut self, len: usize) {
         self.len = len.clamp(1, self.buf.len());
         if self.idx >= self.len {
@@ -105,43 +109,70 @@ impl Delay {
     }
 }
 
-/// Schroeder-style stereo reverb (parallel damped combs into series all-passes).
+/// A concert hall: early reflections, then a feedback delay network whose eight lines mix into
+/// each other, so the tail thickens smoothly rather than ringing like a row of separate echoes.
 pub struct Reverb {
-    combs: Vec<(Delay, f32)>,
-    allpass: Vec<Delay>,
+    tapped: Vec<f32>,
+    tap_at: usize,
+    lines: Vec<Delay>,
+    damp: [f32; 8],
+    diffuse: Vec<Delay>,
 }
+
+const EARLY_TAPS: [(usize, f32, f32); 6] = [(531, 0.5, -0.7), (887, 0.42, 0.6), (1277, 0.36, -0.3), (1693, 0.3, 0.8), (2293, 0.24, -0.8), (3011, 0.2, 0.4)];
 
 impl Reverb {
     pub fn new() -> Self {
-        let tunings = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
-        let combs = tunings
-            .iter()
-            .enumerate()
-            .map(|(i, &t)| (Delay::new(t + if i % 2 == 1 { 23 } else { 0 }), 0.0))
-            .collect();
-        let allpass = [556, 441, 579, 341].iter().map(|&t| Delay::new(t)).collect();
-        Reverb { combs, allpass }
+        let lines = [1913, 2251, 2647, 3083, 3491, 3967, 4421, 4943].iter().map(|&t| Delay::new(t)).collect();
+        let diffuse = [331, 557, 809].iter().map(|&t| Delay::new(t)).collect();
+        Reverb { tapped: vec![0.0; 4096], tap_at: 0, lines, damp: [0.0; 8], diffuse }
     }
+
+    /// Empties the hall at once.
+    pub fn clear(&mut self) {
+        self.tapped.fill(0.0);
+        self.damp = [0.0; 8];
+        self.lines.iter_mut().chain(&mut self.diffuse).for_each(Delay::clear);
+    }
+
     #[inline]
     pub fn process(&mut self, x: f32, room: f32, damp: f32) -> (f32, f32) {
-        let (mut l, mut r) = (0.0, 0.0);
-        for (i, (d, store)) in self.combs.iter_mut().enumerate() {
-            let out = d.tap();
-            *store = out * (1.0 - damp) + *store * damp;
-            d.push(x + *store * room);
-            if i % 2 == 0 {
-                l += out;
-            } else {
-                r += out;
-            }
+        // Reflections from the walls, before the room's sound blurs together.
+        self.tapped[self.tap_at] = x;
+        let n = self.tapped.len();
+        let (mut el, mut er) = (0.0, 0.0);
+        for &(delay, gain, pan) in &EARLY_TAPS {
+            let v = self.tapped[(self.tap_at + n - delay) % n] * gain;
+            el += v * (0.5 - pan * 0.5);
+            er += v * (0.5 + pan * 0.5);
         }
-        for (i, ap) in self.allpass.iter_mut().enumerate() {
-            let s = if i % 2 == 0 { &mut l } else { &mut r };
+        self.tap_at = (self.tap_at + 1) % n;
+
+        // All-passes smear the input, so that no one attack excites a single echo.
+        let mut input = x;
+        for ap in &mut self.diffuse {
             let b = ap.tap();
-            ap.push(*s + b * 0.5);
-            *s = b - *s;
+            ap.push(input + b * 0.55);
+            input = b - input * 0.55;
         }
-        (l * 0.18, r * 0.18)
+
+        let mut out = [0.0f32; 8];
+        let mut sum = 0.0;
+        for (o, line) in out.iter_mut().zip(&self.lines) {
+            *o = line.tap();
+            sum += *o;
+        }
+        // A Householder matrix: every line feeds every other, with no energy gained or lost.
+        let mix = sum * 0.25;
+        for i in 0..8 {
+            let v = (out[i] - mix) * room;
+            // Air and soft furnishings soak up the highs faster than the lows.
+            self.damp[i] = v * (1.0 - damp) + self.damp[i] * damp;
+            self.lines[i].push(self.damp[i] + input * 0.35);
+        }
+        let l = out[0] + out[2] + out[4] + out[6];
+        let r = out[1] + out[3] + out[5] + out[7];
+        (l * 0.2 + el * 0.5, r * 0.2 + er * 0.5)
     }
 }
 

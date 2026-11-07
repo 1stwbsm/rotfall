@@ -211,6 +211,9 @@ pub struct App {
     pub saves: [Option<SaveInfo>; 4],
     pub records: Vec<Record>,
     pub menu_t: f32,
+    was_previewing: bool,
+    ui_hot: u64,
+    ui_mouse: (f32, f32),
     pub data_dir: PathBuf,
     /// Weapon chosen in the armory, applied through the normal input path.
     pub queued_select: Option<usize>,
@@ -246,6 +249,27 @@ const BUILD_KEYS: [K; 10] = [K::Digit1, K::Digit2, K::Digit3, K::Digit4, K::Digi
 pub const SLOTS: [Slot; 4] = [Slot::Solo, Slot::Permadeath, Slot::Host, Slot::HostPermadeath];
 
 impl App {
+    pub fn menu_sound(&self, id: Sfx, gain: f32) {
+        self.audio.send(Cmd::Play { id, gain, pan: 0.0, pitch: 1.0 });
+    }
+
+    /// Plays what the interface asked for this frame, and notices the pointer reaching a new
+    /// control. A control appearing under a still pointer is not the player doing anything, and
+    /// touchscreens have no hover at all.
+    pub fn menu_sounds(&mut self, hot: u64, mouse: (f32, f32), sounds: &[(Sfx, f32, f32)]) {
+        let moved = mouse != self.ui_mouse;
+        self.ui_mouse = mouse;
+        if hot != self.ui_hot {
+            self.ui_hot = hot;
+            if hot != 0 && moved && sounds.is_empty() && !self.touch.enabled {
+                self.menu_sound(Sfx::MenuHover, 0.5);
+            }
+        }
+        for &(id, gain, pitch) in sounds {
+            self.audio.send(Cmd::Play { id, gain, pan: 0.0, pitch });
+        }
+    }
+
     pub fn new(seed: u64, audio: Audio) -> App {
         Self::with_dir(seed, audio, save::data_dir())
     }
@@ -282,6 +306,9 @@ impl App {
             saves: [None, None, None, None],
             records: load_records(&dir.join("records.txt")),
             menu_t: 0.0,
+            was_previewing: false,
+            ui_hot: 0,
+            ui_mouse: (0.0, 0.0),
             data_dir: dir,
             queued_select: None,
             want_fullscreen,
@@ -595,6 +622,13 @@ impl App {
             self.want_fullscreen = Some(self.settings.fullscreen);
         }
         if let Some(a) = self.action.take() {
+            match a {
+                Action::NewGame { .. } | Action::Continue(_) | Action::StartHost | Action::Join | Action::LoadLast => {
+                    self.menu_sound(Sfx::MenuConfirm, 0.9);
+                }
+                Action::ToTitle { .. } => self.menu_sound(Sfx::MenuBack, 0.8),
+                Action::Quit => {}
+            }
             self.run_action(a);
         }
 
@@ -620,6 +654,7 @@ impl App {
                     self.focus = None;
                     self.menu_error = None;
                     self.store_settings();
+                    self.menu_sound(Sfx::MenuBack, 0.8);
                 }
                 if self.screen == Screen::Title && self.page == Page::Main && raw.hit(K::Enter) {
                     self.action = Some(match self.slot_info(Slot::Solo) {
@@ -631,6 +666,7 @@ impl App {
             Screen::Paused => {
                 if raw.hit(K::Escape) {
                     self.screen = Screen::Playing;
+                    self.menu_sound(Sfx::MenuBack, 0.8);
                 }
                 // A network game has other people in it, so it cannot stop for you.
                 if self.is_multiplayer() {
@@ -701,12 +737,14 @@ impl App {
             self.preview = None;
         }
         let want = if self.screen == Screen::Title { self.preview.unwrap_or(Track::Menu) } else { self.world.wave_track() };
+        let previewing = self.preview.is_some();
         if self.music_now != Some(want) {
             self.music_now = Some(want);
-            self.audio.send(Cmd::Music(want));
             if self.screen == Screen::Title {
-                self.audio.send(Cmd::Intensity(if self.preview.is_some() { 1.0 } else { 0.0 }));
+                self.audio.send(Cmd::Intensity(if previewing { 1.0 } else { 0.0 }));
             }
+            // Pressing play on the soundtrack page, or stop, should be heard the moment it is pressed.
+            self.audio.send(if previewing || self.was_previewing { Cmd::MusicCut(want) } else { Cmd::Music(want) });
             if self.settings.music > 0.0 {
                 self.toast = Some((want, 4.5));
             }
@@ -717,6 +755,7 @@ impl App {
                 self.toast = None;
             }
         }
+        self.was_previewing = previewing;
     }
 
     /// The whole album: one zip in a browser, separate files in a folder on the desktop.
@@ -875,6 +914,7 @@ impl App {
             } else if self.build_sel.is_some() {
                 self.build_sel = None;
             } else {
+                self.menu_sound(Sfx::MenuSelect, 0.7);
                 self.screen = Screen::Paused;
             }
         }
@@ -1075,6 +1115,73 @@ mod tests {
         app: App,
         raw: RawInput,
         frame: FrameData,
+    }
+
+    /// Everything played since the last call, in order.
+    fn played(rx: &std::sync::mpsc::Receiver<Cmd>) -> Vec<Sfx> {
+        rx.try_iter().filter_map(|c| if let Cmd::Play { id, .. } = c { Some(id) } else { None }).collect()
+    }
+
+    #[test]
+    fn menus_make_the_right_sounds_at_the_right_times() {
+        let (audio, rx) = Audio::capture();
+        let mut d = Driver { app: App::with_dir(5, audio, test_dir("menu_sounds")), raw: RawInput::default(), frame: FrameData::new() };
+        let (w, h) = (SIZE.0 as f32, SIZE.1 as f32);
+        d.raw.mouse = (w - 5.0, h * 0.5);
+        d.run(3);
+        played(&rx);
+
+        // Find NEW GAME by walking the pointer down the column, listening for a hover.
+        let x = crate::game::hud::logo_rect(SIZE)[0] + 40.0;
+        let mut item = None;
+        for y in (0..SIZE.1).step_by(4) {
+            d.raw.mouse = (x, y as f32);
+            d.step();
+            if played(&rx).contains(&Sfx::MenuHover) {
+                item = Some(y as f32 + 6.0);
+                break;
+            }
+        }
+        let y = item.expect("the pointer never crossed a menu item");
+
+        // Within one control, or with the pointer still, there is nothing new to announce.
+        d.raw.mouse = (x, y);
+        d.step();
+        played(&rx);
+        d.raw.mouse = (x + 3.0, y);
+        d.run(5);
+        assert_eq!(played(&rx), vec![], "hover repeated on one control");
+
+        // Pressing goes deeper. The next page's control under a still pointer stays quiet.
+        d.click(x + 3.0, y);
+        assert_eq!(d.app.page, Page::NewGame);
+        assert_eq!(played(&rx), vec![Sfx::MenuSelect]);
+        d.run(5);
+        assert_eq!(played(&rx), vec![]);
+
+        // Escape is the same gesture as a back button.
+        d.tap(K::Escape);
+        assert_eq!(d.app.page, Page::Main);
+        assert_eq!(played(&rx), vec![Sfx::MenuBack]);
+
+        // Starting a run gets the big one, and only that.
+        d.app.page = Page::NewGame;
+        d.step();
+        played(&rx);
+        let mut hit = None;
+        for y in (0..SIZE.1).step_by(4) {
+            d.raw.mouse = (x, y as f32);
+            d.step();
+            if played(&rx).contains(&Sfx::MenuHover) {
+                hit = Some(y as f32 + 6.0);
+                break;
+            }
+        }
+        d.click(x, hit.expect("no item on the new game page"));
+        d.step();
+        let sounds = played(&rx);
+        assert_eq!(d.app.screen, Screen::Playing);
+        assert!(sounds.contains(&Sfx::MenuConfirm) && !sounds.contains(&Sfx::MenuSelect), "{sounds:?}");
     }
 
     impl Driver {
@@ -1600,6 +1707,64 @@ mod tests {
                 assert!(y + bh <= bar_top, "{} overlaps the build bar on {size:?}", b.label);
             }
         }
+    }
+
+    #[test]
+    fn soundtrack_page_cuts_and_stop_cuts_back() {
+        let (audio, rx) = Audio::capture();
+        let mut d = Driver { app: App::with_dir(5, audio, test_dir("preview_cut")), raw: RawInput::default(), frame: FrameData::new() };
+        d.run(3);
+        let _ = rx.try_iter().count();
+        d.app.page = Page::Soundtrack;
+        d.app.preview = Some(Track::Boss);
+        d.step();
+        assert!(rx.try_iter().any(|c| matches!(c, Cmd::MusicCut(Track::Boss))), "play should cut");
+        d.app.preview = Some(Track::Rot);
+        d.step();
+        assert!(rx.try_iter().any(|c| matches!(c, Cmd::MusicCut(Track::Rot))), "changing tracks should cut");
+        d.app.preview = None;
+        d.step();
+        assert!(rx.try_iter().any(|c| matches!(c, Cmd::MusicCut(Track::Menu))), "stop should cut");
+    }
+
+    /// Frames until a blast's victim is back on their feet, pressing Space this often.
+    fn frames_down(name: &str, every: Option<u32>) -> u32 {
+        let mut d = started(name);
+        let at = d.app.world.me().pos;
+        d.app.world.knock_down(0, at + glam::Vec3::X, 26.0);
+        let mut frames = 0;
+        while d.app.world.me().down_t > 0.0 && frames < 600 {
+            if every.is_some_and(|e| frames % e == 0) {
+                d.raw.pressed.push(K::Space);
+            }
+            d.step();
+            frames += 1;
+        }
+        assert!(d.app.world.me().alive);
+        frames
+    }
+
+    #[test]
+    fn mashing_space_gets_you_up_faster_but_not_instantly() {
+        let lying = frames_down("mash_none", None);
+        let mashing = frames_down("mash_fast", Some(8));
+        let frantic = frames_down("mash_frantic", Some(1));
+        println!("frames down: {lying} still, {mashing} at 7.5 presses/s, {frantic} on every frame");
+        assert!(mashing * 2 < lying, "mashing should at least halve it: {mashing} vs {lying}");
+        // The blast still has to land: nobody gets to skip being knocked over.
+        assert!(frantic as f32 / 60.0 >= 0.55, "{frantic} frames is no knockdown at all");
+    }
+
+    #[test]
+    fn holding_space_does_not_count_as_mashing() {
+        let mut d = started("mash_hold");
+        let at = d.app.world.me().pos;
+        d.app.world.knock_down(0, at + glam::Vec3::X, 26.0);
+        let start = d.app.world.me().down_t;
+        d.raw.down.insert(K::Space);
+        d.run(30);
+        d.raw.down.clear();
+        assert!((start - 0.5 - d.app.world.me().down_t).abs() < 0.05, "only time should have passed");
     }
 
     #[test]

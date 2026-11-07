@@ -42,6 +42,10 @@ impl DeathCause {
 
 /// How long standing back up takes, once a knockdown ends.
 const GETUP_TIME: f32 = 0.5;
+/// Time taken off a knockdown by each press of the roll key.
+const MASH_TIME: f32 = 0.2;
+/// However hard you mash, the blast gets this long to put you on the ground.
+const MIN_DOWN: f32 = 0.6;
 /// Damage multiplier against someone lying helpless on the ground.
 const DOWN_DAMAGE: f32 = 2.0;
 
@@ -89,6 +93,8 @@ pub struct Player {
     /// Seconds left ragdolled and helpless after being blown off your feet.
     pub down_t: f32,
     /// Seconds left of the stand-up animation, and the pose it starts from.
+    /// How long this knockdown has lasted so far.
+    pub down_for: f32,
     pub getup_t: f32,
     pub getup_from: Pose,
     pub death_cause: DeathCause,
@@ -151,6 +157,7 @@ impl Player {
             respawn_seq: 0,
             net_target: Vec2::ZERO,
             down_t: 0.0,
+            down_for: 0.0,
             getup_t: 0.0,
             getup_from: [Vec3::ZERO; JOINTS],
             death_cause: DeathCause::Regular,
@@ -291,6 +298,13 @@ impl World {
         // Thrown off your feet: no moving, no shooting, and everything hurts double.
         if p.alive && p.down_t > 0.0 {
             p.down_t -= dt;
+            p.down_for += dt;
+            if input.dodge {
+                // Never so far that it ends before the floor, which only time can pass.
+                p.down_t = (p.down_t - MASH_TIME).max((MIN_DOWN - p.down_for).max(0.0));
+                self.struggle(i);
+            }
+            let p = &mut self.players[i];
             if p.down_t <= 0.0 {
                 self.stand_up(i);
             }
@@ -581,9 +595,11 @@ impl World {
         if p.down_t > 0.0 {
             // Already on the ground: the new blast only keeps them there.
             p.down_t = p.down_t.max(time);
+            p.down_for = 0.0;
             return;
         }
         p.down_t = time;
+        p.down_for = 0.0;
         p.roll_t = 0.0;
         p.reload = 0.0;
         p.spin = 0.0;
@@ -596,6 +612,19 @@ impl World {
         }
         let at = self.players[i].pos;
         self.snd(Sfx::Hurt, at, 1.0);
+    }
+
+    /// A press of the mash key, as seen and heard: the body jerks as it fights to rise.
+    pub fn struggle(&mut self, i: usize) {
+        if let Some(b) = self.owned_body(i) {
+            let at = self.ragdolls.bodies[b].pos[PELVIS];
+            // Mixed from the pose, so that each press kicks a different way without touching the rng.
+            let wobble = (at.x * 37.0 + at.z * 53.0 + self.players[i].down_t * 91.0).sin();
+            self.ragdolls.impulse(b, at, vec3(wobble * 1.5, 3.2, (wobble * 7.0).cos() * 1.5), 2.0);
+        }
+        if i == self.local {
+            self.audio.send(crate::audio::Cmd::Play { id: Sfx::MenuToggle, gain: 0.55, pan: 0.0, pitch: 0.6 });
+        }
     }
 
     /// The ragdoll for a knockdown. Runs on servers and clients alike.
