@@ -30,7 +30,7 @@ are needed to build.
 | Input | Action |
 | --- | --- |
 | `WASD` / mouse | Move / aim |
-| `LMB` | Shoot at exactly what the cursor is over. Heads take double damage |
+| `LMB` | Shoot |
 | `RMB` | Hold and drag to turn the camera, double click to reset it |
 | `R` | Reload |
 | `Shift` | Sprint |
@@ -125,6 +125,19 @@ Small screens and tablets switch to touch controls by themselves and show a noti
 side to aim and fire, with buttons for everything else. In menus, taps work like clicks. Add `?touch` to
 the browser URL to try it on any screen.
 
+## The soundtrack
+
+Orchestral techno, synthesized from nothing as you play. The orchestra here isn't playing tunes at you. It is the sheer overwhelming size of one, and the techno is a machine that doesn't stop.
+
+- **The Wall** is that orchestra: seventy-two oscillators stacked up the whole range, moving as one block. Nothing in it wanders. It swells, it slams down on the beat, a growing share of it turns sour against the chord, and it gets bigger the closer the horde gets to you.
+- **The Engine.** The night music is slow and machine-tight: a pile-driver kick on every beat, and a slam the size of a building dropping across it at half the speed.
+- **Low.** The tunes are played two octaves down on a heavy distorted riff voice, over bare fifths and the reactor's own drone, with a flat ninth grinding away at the top of every stab.
+- **The Sinking.** Key changes only ever go down. When a theme returns, the whole world has sunk a semitone.
+- **ROT, FALL.** A two-note falling tritone on an enormous horn is the album's call sign, in every song but the last.
+- **The world around it.** Struck hull plates, collapsing buildings, steam, rivets and a Geiger counter.
+
+During a run, each song picks up where it left off instead of replaying its opening every wave. And each has a story to it: in *Rot*, the same few bars go round while the music itself decays. In *One of Many*, one voice becomes an army, exactly in step. In *Smitherines*, you hear the world muffled behind the ringing in your ears until it comes back.
+
 ## Extras
 
 The main menu's Extras page has a gallery of art and screenshots and the soundtrack, where you can listen
@@ -138,7 +151,7 @@ zip.
 | --- | --- |
 | `src/render/` | **Custom renderer.** wgpu is used only as the GPU API. Forward HDR shading with a CPU-binned world-space light grid, sun and flashlight shadow maps, instancing, MSAA, a persistent world-space decal layer, billboard particles, a bloom pyramid, tonemapping, and a bitmap-font UI batcher. All meshes are built procedurally in `mesh.rs`. |
 | `src/ragdoll.rs` | **Custom ragdoll engine.** Position-based dynamics on a 16-joint skeleton, with joint limits, torso bracing, breakable limbs, partial bodies, static collision, pile-ups and sleeping. Living characters are posed on the same skeleton, so death hands over with no visible pop. |
-| `src/audio/` | **Soundtrack and SFX.** Eleven original tracks of orchestral techno, written as note data and synthesized live with no samples. The arrangements are orchestral, the instruments are openly synthesizers: saw pads, a string machine, filter-swept brass, vocal patches, plucks, FM-style bells and electronic toms, over a drum machine and bass. Layers follow the battle's intensity. All effects, including the menu sounds, are synthesized at startup. Output goes through a small runtime-loaded ALSA binding. |
+| `src/audio/` | **Soundtrack and SFX.** Eleven original tracks of orchestral techno, written as note data and synthesized live with no samples. See [The soundtrack](#the-soundtrack). Layers follow the battle's intensity. All effects, including the menu sounds, are synthesized at startup. Output goes through a small runtime-loaded ALSA binding. |
 | `src/game/` | Simulation: flow-field navigation, zombie AI, combat, base building, waves, HUD, and a bot that plays the game. `net.rs` is the co-op protocol and `save.rs` the save format. |
 | `tools/menu_scene.py` | **Art.** A Blender scene built entirely from script: the menu background and logo, the thumbnails in `assets/`, and the icon. `tools/render_menu_art.sh` re-renders them all. |
 
@@ -185,6 +198,9 @@ rotfall --capture host --times 40 --host --port 27511 --wave 8   # a bot hosts a
 rotfall --capture guest --times 30 --connect 127.0.0.1:27511     # a scripted client joins it
 rotfall --bench 15 --wave 14 --size 1920x1080           # sim and GPU timing on this machine
 rotfall --bench-music                                   # music CPU cost, track by track (?bench-music in a browser)
+rotfall --export-ost DIR                                # the whole album as WAV files
+rotfall --export-stems holdout DIR                      # one track, one WAV per mix layer
+rotfall --dump-score DIR                                # every note of every track, as text
 rotfall --render-music boss 60 1.0 boss.wav             # menu|build|a|b|c|boss|over SECS INTENSITY FILE
 ```
 

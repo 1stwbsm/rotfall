@@ -147,7 +147,7 @@ pub struct World {
     sfx_budget: [u8; crate::audio::sfx::SFX_COUNT],
     pub zhash_head: Vec<i32>,
     pub zhash_next: Vec<i32>,
-    pub hit_scratch: Vec<(f32, u32, bool)>,
+    pub hit_scratch: Vec<(f32, u32, f32)>,
     pub query_scratch: Vec<u32>,
     pub invincible: bool,
     pub sfx_gain: f32,

@@ -948,8 +948,7 @@ impl App {
     fn play_input(&mut self, dt: f32, raw: &RawInput, w: f32, h: f32) {
         self.camera_input(dt, raw);
         let in_menu = self.armory_open || self.help_open;
-        let (eye, ray) = self.cam.cursor_ray(raw.mouse.0, raw.mouse.1, w, h);
-        let world_cursor = self.world.aim_point(eye, ray);
+        let world_cursor = self.cam.cursor_to_plane(raw.mouse.0, raw.mouse.1, w, h, 1.2);
         let ground_cursor = self.cam.cursor_to_plane(raw.mouse.0, raw.mouse.1, w, h, 0.0);
         self.hover_tile = tile_of(Vec2::new(ground_cursor.x, ground_cursor.z));
 
@@ -1160,99 +1159,18 @@ mod tests {
 
     const SIZE: (u32, u32) = (1600, 900);
 
-    /// Keeps the base's sentries out of a test about the player's own shots.
-    fn hold_fire(d: &mut Driver) {
-        for s in &mut d.app.world.structures {
-            s.cooldown = 999.0;
-        }
-    }
-
-    /// Fires at a point on a zombie for half a second, tracking it as it walks.
-    fn shoot_at(d: &mut Driver, point: impl Fn(&crate::game::zombie::Zombie, f32) -> glam::Vec3) {
-        d.raw.lmb = true;
-        d.raw.lmb_pressed = true;
-        for _ in 0..30 {
-            hold_fire(d);
-            let Some(z) = d.app.world.zombies.first() else { break };
-            let at = point(z, d.app.world.time);
-            d.raw.mouse = d.app.cam.world_to_screen(at, SIZE.0 as f32, SIZE.1 as f32).unwrap();
-            d.step();
-        }
-        d.raw.lmb = false;
-        d.raw.down.clear();
-    }
-
-    fn lone_zombie(d: &mut Driver, kind: crate::game::data::ZKind, off: Vec2) {
-        d.app.world.zombies.clear();
-        let at = d.app.world.me().pos2() + off;
-        d.app.world.spawn_zombie(kind, at);
-        d.app.world.zombies[0].spawn_t = 0.0;
-        d.app.world.stats.headshots = 0;
-        hold_fire(d);
-        d.step();
-    }
-
     #[test]
-    fn hovering_over_a_giants_head_hits_it() {
-        use crate::game::data::ZKind;
-        // Off to one side, where projecting the cursor onto a flat plane used to aim well past it.
-        for off in [Vec2::new(10.0, 5.0), Vec2::new(-11.0, -3.0), Vec2::new(3.0, -11.0)] {
-            let mut d = started("giant_head");
-            lone_zombie(&mut d, ZKind::Titan, off);
-            let hp = d.app.world.zombies[0].hp;
-            shoot_at(&mut d, |z, t| z.pose(t)[crate::ragdoll::HEAD]);
-            assert!(d.app.world.zombies[0].hp < hp, "every shot missed from {off:?}");
-            assert!(d.app.world.stats.headshots > 0, "hit, but not in the head, from {off:?}");
-        }
-    }
-
-    #[test]
-    fn body_shots_land_but_only_heads_are_critical() {
-        use crate::game::data::ZKind;
-        let mut d = started("body_shot");
-        lone_zombie(&mut d, ZKind::Titan, Vec2::new(9.0, 4.0));
-        let hp = d.app.world.zombies[0].hp;
-        shoot_at(&mut d, |z, _| z.pos + glam::Vec3::Y * 1.0 * z.scale);
-        assert!(d.app.world.zombies[0].hp < hp, "the body shots missed");
-        assert_eq!(d.app.world.stats.headshots, 0, "a shot at the waist is no headshot");
-    }
-
-    #[test]
-    fn shots_at_the_ground_stop_at_the_ground() {
-        use crate::game::data::ZKind;
-        let mut d = started("ground_shot");
-        lone_zombie(&mut d, ZKind::Titan, Vec2::new(14.0, 0.0));
-        let (me, hp) = (d.app.world.me().pos, d.app.world.zombies[0].hp);
-        // Well short of the target: the bullets strike the ground on the way.
-        d.raw.lmb = true;
-        d.raw.lmb_pressed = true;
-        for _ in 0..10 {
-            hold_fire(&mut d);
-            d.raw.mouse = d.app.cam.world_to_screen(me + glam::vec3(4.0, 0.0, 0.0), SIZE.0 as f32, SIZE.1 as f32).unwrap();
-            d.step();
-        }
-        d.raw.lmb = false;
-        assert_eq!(d.app.world.zombies[0].hp, hp, "the bullets should have stopped at the cursor");
-        let aim = d.app.world.me().aim;
-        assert!(aim.y.abs() < 0.01 && d.app.world.me().aim_dir().y < -0.1, "the gun should tip down, aim {aim}");
-    }
-
-    #[test]
-    fn the_gun_points_exactly_at_the_cursor_from_any_side() {
-        let mut d = started("exact_aim");
+    fn the_gun_fires_level_at_the_cursor_from_any_side() {
+        let mut d = started("level_aim");
         for yaw in [0.0, 1.3, -2.4] {
             d.app.cam.yaw = yaw;
             d.run(40);
-            let me = d.app.world.me().pos;
-            let target = me + glam::vec3(6.0, 0.0, 3.0);
+            let target = d.app.world.me().pos + glam::vec3(6.0, 1.2, 3.0);
             d.raw.mouse = d.app.cam.world_to_screen(target, SIZE.0 as f32, SIZE.1 as f32).unwrap();
             d.step();
             let p = d.app.world.me();
             assert!(p.aim.distance(target) < 0.25, "aimed at {} not {target} with the camera at {yaw}", p.aim);
-            // Following the shot from the muzzle lands where the cursor is.
-            let (from, dir) = (p.muzzle(), p.shot_dir());
-            let hit = from + dir * (-from.y / dir.y);
-            assert!(hit.distance(p.aim) < 0.05, "shot lands at {hit}, aimed at {}", p.aim);
+            assert!((p.aim.y - 1.2).abs() < 0.001, "the aim stays on the chest height plane, not at {}", p.aim.y);
         }
     }
 

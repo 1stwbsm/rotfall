@@ -1,6 +1,6 @@
 [package]
 name = "rotfall"
-version = "1.0.3"
+version = "1.1.0"
 license = "GPL-3.0-only"
 description = "Top-down 3D wave survival shooter with base building and co-op"
 repository = "https://github.com/1stwbsm/rotfall"

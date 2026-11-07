@@ -117,6 +117,10 @@ impl Map {
         let mut best: Option<f32> = None;
         let lim = max;
         for a in &self.solids {
+            if a.max.y < from.y {
+                continue;
+            }
+            // Quick reject using distance from the ray start.
             let mut t0 = 0.0f32;
             let mut t1 = lim;
             let mut hit = true;
@@ -140,9 +144,7 @@ impl Map {
                     }
                 }
             }
-            // A ray can pass over something low, as long as it stays above it all the way across.
-            let lowest = (from.y + dir.y * t0).min(from.y + dir.y * t1);
-            if hit && lowest <= a.max.y && best.is_none_or(|b| t0 < b) {
+            if hit && best.is_none_or(|b| t0 < b) {
                 best = Some(t0);
             }
         }

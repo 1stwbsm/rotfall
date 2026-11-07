@@ -57,6 +57,8 @@ struct Options {
     autoplay: bool,
     force_touch: bool,
     export_ost: Option<String>,
+    export_stems: Option<(String, String)>,
+    dump_score: Option<String>,
     bench_music: bool,
 }
 
@@ -91,6 +93,8 @@ fn parse_args() -> Options {
         autoplay: false,
         force_touch: false,
         export_ost: None,
+        export_stems: None,
+        dump_score: None,
         bench_music: false,
     };
     #[cfg(not(target_arch = "wasm32"))]
@@ -120,6 +124,11 @@ fn parse_args() -> Options {
             "--autoplay" => o.autoplay = true,
             "--touch" => o.force_touch = true,
             "--export-ost" => o.export_ost = Some(next(&mut i)),
+            "--export-stems" => {
+                let track = next(&mut i);
+                o.export_stems = Some((track, next(&mut i)));
+            }
+            "--dump-score" => o.dump_score = Some(next(&mut i)),
             "--bench-music" => o.bench_music = true,
             "--capture" => o.capture = Some(next(&mut i)),
             "--times" => o.times = next(&mut i).split(',').filter_map(|t| t.parse().ok()).collect(),
@@ -164,6 +173,7 @@ fn parse_args() -> Options {
                 println!("       --capture with --host [--port N] or --connect ADDR [--name X] plays a real network session");
                 println!("       --bench SECONDS --wave N    (GPU and simulation timing on the current machine)");
                 println!("       --bench-music               (music CPU cost, track by track)");
+                println!("       --export-ost DIR | --export-stems TRACK DIR | --dump-score DIR   (the soundtrack, for study)");
                 println!("       --render-music menu|build|a|b|c|boss|over SECONDS INTENSITY OUT.wav");
                 std::process::exit(0);
             }
@@ -902,7 +912,7 @@ fn main() {
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().collect();
-        let cli = ["--server", "--capture", "--bench", "--bench-music", "--render-music", "--help", "-h"];
+        let cli = ["--server", "--capture", "--bench", "--bench-music", "--export-ost", "--export-stems", "--dump-score", "--render-music", "--help", "-h"];
         if args.iter().any(|a| cli.contains(&a.as_str())) {
             win::console();
         }
@@ -919,17 +929,18 @@ fn main() {
         return;
     }
     if let Some((t, secs, inten, out)) = &o.render_music {
-        let track = match t.as_str() {
-            "menu" => Track::Menu,
-            "build" => Track::Build,
-            "a" => Track::CombatA,
-            "b" => Track::CombatB,
-            "c" => Track::CombatC,
-            "boss" => Track::Boss,
-            _ => Track::GameOver,
-        };
+        let track = audio::find_track(t).unwrap_or(Track::GameOver);
         audio::render_track_wav(track, *secs, *inten, out).expect("failed to write wav");
         println!("wrote {out}");
+        return;
+    }
+    if let Some((track, dir)) = &o.export_stems {
+        let track = audio::find_track(track).expect("no track by that name");
+        audio::export_stems(track, dir).expect("failed to write the stems");
+        return;
+    }
+    if let Some(dir) = &o.dump_score {
+        audio::dump_soundtrack(dir).expect("failed to write the score");
         return;
     }
     if let Some(dir) = &o.export_ost {

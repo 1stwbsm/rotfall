@@ -7,7 +7,9 @@ mod backend;
 #[path = "winmm.rs"]
 mod backend;
 pub mod dsp;
+mod mass;
 pub mod music;
+mod score;
 pub mod sfx;
 
 use dsp::*;
@@ -108,6 +110,10 @@ impl Mixer {
     /// Render interleaved stereo; output is limited to [-1, 1].
     pub fn render(&mut self, out: &mut [f32]) {
         out.iter_mut().for_each(|s| *s = 0.0);
+        // A wall of sound is no use if it hides the zombie behind you, so it makes room for gunfire,
+        // groans and footsteps. A few decibels are enough, as they are all in the same range.
+        let load: f32 = self.voices.iter().map(|v| v.gl + v.gr).sum::<f32>() * self.sfx_volume;
+        self.music.room_wanted = (1.0 / (1.0 + load * 0.22)).max(0.62);
         self.music.render_add(out);
         let vol = self.sfx_volume;
         let bank = &self.bank;
@@ -286,16 +292,17 @@ pub fn bench_music() -> String {
         mixer.apply(Cmd::Intensity(1.0));
         let mut buf = vec![0.0f32; BLOCK * 2];
         let blocks = (track.loop_seconds() * SR / BLOCK as f32) as usize + 1;
-        let (mut total, mut worst) = (0.0f64, 0.0f64);
+        let (mut total, mut worst, mut crowd) = (0.0f64, 0.0f64, 0);
         for _ in 0..blocks {
             let t = Instant::now();
             mixer.render(&mut buf);
             let ms = t.elapsed().as_secs_f64() * 1000.0;
             total += ms;
             worst = worst.max(ms);
+            crowd = crowd.max(mixer.music.voices_playing());
         }
         let average = total / blocks as f64;
-        report += &format!("{:<28} {:>4} blocks  avg {average:>5.2} ms ({:>3.0}%)  worst {worst:>5.2} ms ({:>3.0}%)\n", track.name(), blocks, average / budget * 100.0, worst / budget * 100.0);
+        report += &format!("{:<28} {:>4} blocks  avg {average:>5.2} ms ({:>3.0}%)  worst {worst:>5.2} ms ({:>3.0}%)  {crowd:>3} voices\n", track.name(), blocks, average / budget * 100.0, worst / budget * 100.0);
     }
     report
 }
@@ -387,6 +394,58 @@ pub fn render_track_wav(track: Track, seconds: f32, intensity: f32, path: &str) 
     std::fs::write(path, encode_wav(&pcm))
 }
 
+/// Finds a track by the start of its name, or by the short names `--render-music` has always used.
+pub fn find_track(name: &str) -> Option<Track> {
+    match name {
+        "menu" => return Some(Track::Menu),
+        "build" => return Some(Track::Build),
+        "a" => return Some(Track::CombatA),
+        "b" => return Some(Track::CombatB),
+        "c" => return Some(Track::CombatC),
+        "boss" => return Some(Track::Boss),
+        "over" => return Some(Track::GameOver),
+        _ => {}
+    }
+    let name = name.to_lowercase();
+    Track::ALL.iter().copied().find(|t| t.name().to_lowercase().starts_with(&name))
+}
+
+/// One pass through a track, one file per mix layer, for checking how the mix sits together.
+pub fn export_stems(track: Track, dir: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for (bus, name) in music::BUS_NAMES.iter().enumerate() {
+        let mut m = Mixer::music_only(track);
+        m.music.set_intensity(1.0);
+        m.music.intensity = 1.0;
+        m.music.volume = 1.0;
+        m.music.solo = Some(bus);
+        let mut buf = vec![0.0f32; (track.loop_seconds() * SR) as usize * 2];
+        for c in buf.chunks_mut(1024) {
+            m.render(c);
+        }
+        let pcm: Vec<i16> = buf.iter().map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16).collect();
+        std::fs::write(std::path::Path::new(dir).join(format!("{name}.wav")), encode_wav(&pcm))?;
+    }
+    Ok(())
+}
+
+/// Writes down every note of the soundtrack as text, one file per track.
+pub fn dump_soundtrack(dir: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for t in Track::ALL {
+        let (notes, marks) = music::dump_score(t);
+        let mut out = String::new();
+        for (time, section, chords) in marks {
+            out += &format!("s,{time:.3},{section},{chords}\n");
+        }
+        for n in notes {
+            out += &format!("n,{:.3},{:?},{:.2},{:.2},{:.3},{:.3},{:.2}\n", n.time, n.inst, n.note, n.to, n.vel, n.gate, n.pan);
+        }
+        std::fs::write(std::path::Path::new(dir).join(format!("{}.csv", t.name().split(',').next().unwrap_or(""))), out)?;
+    }
+    Ok(())
+}
+
 /// Writes the whole soundtrack to a folder.
 pub fn export_soundtrack(dir: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
@@ -419,7 +478,7 @@ mod tests {
         assert_eq!(Track::Menu.name(), "Descent");
         for t in Track::ALL {
             let secs = t.loop_seconds();
-            assert!((8.0..300.0).contains(&secs), "{t:?} loops every {secs} s");
+            assert!((8.0..480.0).contains(&secs), "{t:?} loops every {secs} s");
         }
     }
 
@@ -465,7 +524,7 @@ mod tests {
                     assert!(n == "-" || parse_note(n).is_some(), "bad note {tok} in {t:?}");
                     assert!(tok.split(':').nth(1).and_then(|v| v.parse::<u32>().ok()).is_some(), "bad len {tok}");
                 }
-                for p in [s.kick, s.snare, s.hat, s.ride, s.bass, s.acid, s.arp, s.low, s.tom, s.sub, s.stab] {
+                for p in [s.kick, s.snare, s.hat, s.ride, s.bass, s.arp, s.low, s.tom, s.sub, s.stab] {
                     assert!(p.is_empty() || p.len() == 16, "pattern `{p}` in {t:?} is not 16 steps");
                 }
             }
@@ -505,7 +564,9 @@ mod tests {
                             let (root, tones) = chords[((step / 16) as usize) % chords.len()];
                             let pc = (note - root).rem_euclid(12.0);
                             all += l;
-                            if tones.iter().any(|x| (x.rem_euclid(12.0) - pc).abs() < 0.01) {
+                            // A bare fifth doesn't say whether it is major or minor, so a tune can.
+                            let open = tones[1] == 12.0 && (pc == 3.0 || pc == 4.0);
+                            if open || tones.iter().any(|x| (x.rem_euclid(12.0) - pc).abs() < 0.01) {
                                 on += l;
                             }
                         }
@@ -525,6 +586,41 @@ mod tests {
         }
     }
 
+    /// Everything written in `Note:length` form has to fit its section, and a typo would otherwise
+    /// just play quietly wrong forever.
+    #[test]
+    fn every_part_parses_and_lines_up() {
+        for t in TRACKS {
+            for (si, s) in song(t).sections.iter().enumerate() {
+                let len = parse_section(s).len;
+                for (pi, part) in s.kit.iter().chain(s.parts).enumerate() {
+                    match part.score {
+                        Score::Line(text) => {
+                            let mut total = 0;
+                            for tok in text.split_whitespace() {
+                                let (notes, l) = tok.split_once(':').unwrap_or_else(|| panic!("{t:?} section {si} part {pi}: `{tok}` has no length"));
+                                total += l.parse::<u32>().unwrap_or_else(|_| panic!("{t:?} section {si} part {pi}: bad length in `{tok}`"));
+                                if notes != "-" {
+                                    for n in notes.split('+').flat_map(|n| n.split('>')) {
+                                        assert!(parse_note(n).is_some(), "{t:?} section {si} part {pi}: bad note `{n}`");
+                                    }
+                                }
+                            }
+                            assert!(total > 0);
+                            let whole = len * s.repeats;
+                            assert!(total % len == 0 || len % total == 0, "{t:?} section {si} part {pi}: {total} steps in a section of {len}");
+                            assert!(total <= whole || total % whole == 0, "{t:?} section {si} part {pi}: {total} steps, but only {whole} to play them in");
+                        }
+                        Score::Hits(note, pattern) => {
+                            assert!(parse_note(note).is_some() && !pattern.is_empty(), "{t:?} section {si} part {pi}");
+                            assert!(pattern.len() % 16 == 0, "{t:?} section {si} part {pi}: `{pattern}` doesn't fit the bar");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn every_section_sits_in_a_song_that_loops_cleanly() {
         for t in TRACKS {
@@ -532,6 +628,74 @@ mod tests {
             assert!(s.loop_to < s.sections.len(), "{t:?}");
             for sec in s.sections {
                 assert!(!sec.chords.is_empty() && sec.repeats > 0 && (0.0..=1.0).contains(&sec.energy), "{t:?}");
+            }
+        }
+    }
+
+    /// The things that make it this soundtrack and not some other one.
+    #[test]
+    fn the_album_keeps_its_rules() {
+        for t in TRACKS {
+            let (notes, marks) = dump_score(t);
+            // ROT, FALL: every song has the call sign, except the one where it is all over.
+            assert_eq!(notes.iter().any(|n| n.inst == Inst::Horn), t != Track::RestWell, "{t:?}");
+            for s in song(t).sections {
+                // The world only ever sinks.
+                assert!(s.shift <= 0, "{t:?} has a key change going up");
+            }
+            // The orchestra is somewhere in every song, and there is more than one section to each.
+            assert!(song(t).sections.iter().any(|s| s.mass.level.0.max(s.mass.level.1) > 0.05), "{t:?}");
+            assert!(marks.len() >= 4, "{t:?} has only {} sections", marks.len());
+        }
+        // The night is slow, low and heavy. Nothing about it should want to dance.
+        for t in [Track::CombatA, Track::CombatB, Track::CombatC, Track::Boss, Track::Smitherines] {
+            let s = song(t);
+            assert!(s.bpm <= 112.0 && s.low <= -24.0, "{t:?}");
+            assert_eq!(s.lead_inst, Inst::Riff, "{t:?}");
+            for sec in s.sections {
+                // No hat or vent leaning on the offbeat without one on the beat, which is what makes a
+                // groove bounce.
+                let hat = sec.hat.as_bytes();
+                if hat.len() == 16 {
+                    assert!(hat[0] != b'.', "{t:?} has a bouncing hat: {}", sec.hat);
+                }
+            }
+        }
+    }
+
+    /// Nothing may wobble. A note has to stay where it was put, from its first moment to its last.
+    #[test]
+    fn pitched_voices_do_not_warble() {
+        let f0 = dsp::midi_hz(57.0);
+        // The fundamental's phase in a stretch of sound. How fast it turns is the pitch actually heard.
+        let phase_at = |x: &[f32]| -> f32 {
+            let (mut re, mut im) = (0.0, 0.0);
+            for (i, v) in x.iter().enumerate() {
+                let a = std::f32::consts::TAU * f0 * i as f32 / SR;
+                let w = 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / x.len() as f32).cos();
+                re += v * w * a.cos();
+                im -= v * w * a.sin();
+            }
+            im.atan2(re)
+        };
+        for inst in [Inst::Pad, Inst::SynthStrings, Inst::Brass, Inst::Riff, Inst::Hum, Inst::Horn, Inst::Bass, Inst::Ring] {
+            let x = music::render_note(inst, 57.0, 3.0);
+            let (hop, size) = (2205, 8820);
+            let mut last = None;
+            for w in 0..((x.len() - 22050 - size) / hop) {
+                let at = 22050 + w * hop;
+                let phase = phase_at(&x[at..at + size]);
+                // Each window starts `hop` samples later, so a perfectly steady note turns by exactly this.
+                let turn = std::f32::consts::TAU * f0 * at as f32 / SR;
+                let drift = phase + turn;
+                if let Some(before) = last {
+                    let mut change: f32 = drift - before;
+                    change = (change + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                    let hz = change / std::f32::consts::TAU * SR / hop as f32;
+                    // Six cents is about as far as a note can move before it starts to sound like it moved.
+                    assert!(hz.abs() < f0 * 0.0035, "{inst:?} is moving by {hz:.2} Hz around {f0:.0} Hz");
+                }
+                last = Some(drift);
             }
         }
     }
@@ -565,6 +729,30 @@ mod tests {
             assert!(level > 0.01, "{t:?} too quiet: {level}");
             assert!(level < 0.7, "{t:?} too loud: {level}");
         }
+    }
+
+    #[test]
+    fn the_music_makes_room_for_the_game() {
+        let mut m = Mixer::new(Track::Boss);
+        let mut b = vec![0.0; 2048];
+        m.render(&mut b);
+        assert_eq!(m.music.room_wanted, 1.0, "nothing to make room for yet");
+        for _ in 0..6 {
+            m.apply(Cmd::Play { id: Sfx::Pistol, gain: 0.8, pan: 0.0, pitch: 1.0 });
+        }
+        m.render(&mut b);
+        assert!(m.music.room_wanted < 0.8, "six gunshots should move it: {}", m.music.room_wanted);
+        // Never by so much that the fight loses its score.
+        for _ in 0..60 {
+            m.apply(Cmd::Play { id: Sfx::ExplosionBig, gain: 2.0, pan: 0.0, pitch: 1.0 });
+        }
+        m.render(&mut b);
+        assert!(m.music.room_wanted >= 0.62);
+        // And all the way back once the sounds have finished.
+        for _ in 0..600 {
+            m.render(&mut b);
+        }
+        assert_eq!(m.music.room_wanted, 1.0);
     }
 
     #[test]
@@ -609,6 +797,43 @@ mod tests {
         m.render_add(&mut after);
         assert_eq!(m.track(), Track::CombatA);
         assert!(!m.is_crossfading());
+    }
+
+    #[test]
+    fn songs_pick_up_where_they_left_off() {
+        let mut m = Music::new(Track::CombatA);
+        let mut b = vec![0.0; 44100 * 2 * 12];
+        m.render_add(&mut b);
+        let reached = m.section();
+        assert!(reached >= 1, "twelve seconds should be past the intro");
+        // Off to build for a while, and back: the next section, not the intro again.
+        m.set_track(Track::Build);
+        m.render_add(&mut b);
+        m.set_track(Track::CombatA);
+        assert_eq!(m.section(), reached + 1);
+        // A death track always starts with its blow, and doesn't lose the fight's place.
+        m.set_track(Track::Rot);
+        m.render_add(&mut b[..1024]);
+        assert_eq!(m.track(), Track::Rot);
+        assert_eq!(m.section(), 0);
+        m.set_track(Track::CombatA);
+        assert_eq!(m.section(), reached + 2);
+        // The title screen's own song is an overture, and is always heard from the start.
+        let mut m = Music::new(Track::Menu);
+        m.render_add(&mut b);
+        m.render_add(&mut b);
+        m.render_add(&mut b);
+        assert!(m.section() >= 1);
+        m.set_track(Track::Build);
+        m.render_add(&mut b[..1024]);
+        m.set_track(Track::Menu);
+        assert_eq!(m.section(), 0);
+        // And a new run starts everything over, wherever the last one got to.
+        m.set_track(Track::CombatA);
+        m.render_add(&mut b);
+        m.set_track(Track::Menu);
+        m.set_track(Track::CombatA);
+        assert_eq!(m.section(), 0);
     }
 
     #[test]

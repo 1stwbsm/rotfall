@@ -673,7 +673,7 @@ fn help(app: &mut App, ui: &mut Ui) {
     let lines: [(&str, &str); 20] = [
         ("WASD", "MOVE"),
         ("MOUSE", "AIM"),
-        ("LMB", "SHOOT AT THE CURSOR. HEADS TAKE DOUBLE DAMAGE"),
+        ("LMB", "SHOOT"),
         ("RMB HOLD / TWICE", "TURN THE CAMERA / RESET IT"),
         ("R", "RELOAD"),
         ("SHIFT", "SPRINT"),
@@ -1162,7 +1162,7 @@ fn page_manual(app: &mut App, ui: &mut Ui, x: f32, mut y: f32) {
     y += 24.0 * s;
     let lines: [(&str, &str); 16] = [
         ("WASD / MOUSE", "MOVE / AIM"),
-        ("LMB", "SHOOT AT THE CURSOR. HEADS TAKE DOUBLE"),
+        ("LMB", "SHOOT"),
         ("RMB HOLD / TWICE", "TURN THE CAMERA / RESET IT"),
         ("R", "RELOAD"),
         ("SHIFT / SPACE", "SPRINT / DODGE ROLL"),
