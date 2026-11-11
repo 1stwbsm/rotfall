@@ -178,7 +178,7 @@ validators, so problems there are possible and worth reporting.
 
 A Windows build comes from `tools/build_windows.sh`, run on Linux with `zig` and the `rustup` target
 `x86_64-pc-windows-gnu`. It produces `dist/rotfall-windows-x64.zip`. The `.exe` is unsigned, so
-SmartScreen warns on first launch. Saves go to `%APPDATA%\rotfall`, along with a `crash.log` after a crash.
+SmartScreen warns on first launch (And i am NOT going to fix this, i am not shilling my money for a singular program). Saves go to `%APPDATA%\rotfall`, along with a `crash.log` after a crash.
 
 On Linux, the game writes a hidden desktop entry and an icon on launch, because that is the only way a
 Wayland desktop can show a window's icon. Delete `~/.local/share/applications/rotfall.desktop` and
