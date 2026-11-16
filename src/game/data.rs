@@ -85,12 +85,22 @@ pub enum ZKind {
     Spitter,
     Screamer,
     Titan,
+    Leaper,
 }
 
 impl ZKind {
     pub fn from_u8(v: u8) -> Option<ZKind> {
         use ZKind::*;
-        [Walker, Runner, Crawler, Brute, Bloater, Spitter, Screamer, Titan].get(v as usize).copied()
+        [Walker, Runner, Crawler, Brute, Bloater, Spitter, Screamer, Titan, Leaper].get(v as usize).copied()
+    }
+
+    /// The top byte of a zombie's style number, which picks its look. Eight belongs to players who
+    /// have risen again, so the kinds added since step around it.
+    pub fn style_tag(self) -> u32 {
+        match self {
+            ZKind::Leaper => 9,
+            k => k as u32,
+        }
     }
 }
 
@@ -122,11 +132,102 @@ pub fn zdef(k: ZKind) -> ZombieDef {
         ZKind::Brute => d(620.0, 1.75, 34.0, 95.0, 1.3, 1.75, 0.68, 1.5, 45, 6, 1.1, 9.0),
         ZKind::Screamer => d(115.0, 3.3, 7.0, 6.0, 0.8, 1.1, 0.34, 0.98, 22, 7, 0.55, 6.0),
         ZKind::Titan => d(7000.0, 1.8, 60.0, 300.0, 1.6, 3.1, 1.45, 3.1, 500, 5, 0.0, 60.0),
+        // Fragile, and it knows it: it stays out of reach until it can land on you.
+        ZKind::Leaper => d(60.0, 4.6, 13.0, 9.0, 0.45, 1.1, 0.32, 0.96, 16, 6, 1.2, 3.5),
     }
 }
 
-pub const SPAWN_KINDS: [ZKind; 7] =
-    [ZKind::Walker, ZKind::Runner, ZKind::Crawler, ZKind::Bloater, ZKind::Spitter, ZKind::Brute, ZKind::Screamer];
+pub const SPAWN_KINDS: [ZKind; 8] =
+    [ZKind::Walker, ZKind::Runner, ZKind::Crawler, ZKind::Bloater, ZKind::Spitter, ZKind::Brute, ZKind::Screamer, ZKind::Leaper];
+
+/// What the field guide says about each kind.
+pub struct ZombieInfo {
+    pub name: &'static str,
+    pub role: &'static str,
+    pub about: &'static str,
+    pub advice: &'static str,
+}
+
+/// The field guide's order: roughly the order they turn up in.
+pub const FIELD_GUIDE: [ZKind; 9] = [
+    ZKind::Walker, ZKind::Runner, ZKind::Crawler, ZKind::Bloater, ZKind::Spitter,
+    ZKind::Brute, ZKind::Leaper, ZKind::Screamer, ZKind::Titan,
+];
+
+pub fn zinfo(k: ZKind) -> ZombieInfo {
+    let i = |name, role, about, advice| ZombieInfo { name, role, about, advice };
+    match k {
+        ZKind::Walker => i(
+            "WALKER", "THE HORDE ITSELF",
+            "SLOW, DUMB AND ENDLESS. ONE IS NOTHING. THE TROUBLE IS THAT THERE IS NEVER ONE.",
+            "ANYTHING KILLS IT. SPEND YOUR GOOD AMMO ON SOMETHING ELSE AND LET THE SENTRIES MOW.",
+        ),
+        ZKind::Runner => i(
+            "RUNNER", "FAST AND FRAIL",
+            "SPRINTS AHEAD OF THE PACK AND REACHES YOU BEFORE THE REST HAVE CROSSED THE STREET.",
+            "IT DIES TO A COUPLE OF ROUNDS. SHOOT IT FIRST, BEFORE IT IS BEHIND YOU.",
+        ),
+        ZKind::Crawler => i(
+            "CRAWLER", "LOW AND EASY TO MISS",
+            "DRAGS ITSELF ALONG THE GROUND, UNDER YOUR EYE LINE AND THROUGH THE LEGS OF THE HORDE.",
+            "WATCH YOUR FEET WHEN A WAVE THINS OUT. SPIKES AND WIRE STOP IT COLD.",
+        ),
+        ZKind::Bloater => i(
+            "BLOATER", "A WALKING BOMB",
+            "SWOLLEN WITH ACID. WHEN IT DIES IT BURSTS, HURTING EVERYTHING NEARBY AND LEAVING A POOL THAT BURNS.",
+            "KILL IT AT A DISTANCE, IDEALLY IN THE MIDDLE OF ITS FRIENDS. NEVER NEXT TO YOUR WALLS.",
+        ),
+        ZKind::Spitter => i(
+            "SPITTER", "ARTILLERY",
+            "HANGS BACK AND LOBS ACID OVER YOUR WALLS. THE POOLS IT LEAVES EAT PLAYERS AND STRUCTURES ALIKE.",
+            "KEEP MOVING, AND GO AND GET IT. IT BACKS AWAY FROM YOU BUT NOT QUICKLY.",
+        ),
+        ZKind::Brute => i(
+            "BRUTE", "A BATTERING RAM",
+            "A SLAB OF MUSCLE THAT ROARS, CHARGES AND SENDS YOU FLYING. WALLS DO NOT LAST LONG AGAINST IT.",
+            "IT SOAKS UP BULLETS. USE EXPLOSIVES OR YOUR HEAVIEST GUN, AND STAY OUT OF ITS CHARGE.",
+        ),
+        ZKind::Leaper => i(
+            "LEAPER", "AN AMBUSH",
+            "CIRCLES JUST OUT OF REACH, THEN SPRINTS IN AND JUMPS. IF IT LANDS ON YOU IT HOLDS ON AND BITES, AND YOU CAN'T MOVE UNTIL IT IS DEAD.",
+            "IT IS FRAGILE: SHOOT IT WHILE IT CIRCLES. ROLL AS IT JUMPS AND IT LANDS STUNNED. IF IT GETS YOU, JUST FIRE.",
+        ),
+        ZKind::Screamer => i(
+            "SCREAMER", "IT MAKES THE OTHERS WORSE",
+            "ITS SCREAM SENDS EVERY ZOMBIE NEARBY INTO A RAGE, AND RAGING ZOMBIES MOVE MUCH FASTER.",
+            "PALE, AND EASY TO PICK OUT. KILL IT BEFORE ANYTHING ELSE IN THE CROWD.",
+        ),
+        ZKind::Titan => i(
+            "TITAN", "EVERY FIFTH WAVE",
+            "AS TALL AS A HOUSE. ITS SLAM CRACKS THE GROUND, WRECKS WHATEVER YOU BUILT AND HURTS EVERYONE CLOSE. COLD BARELY SLOWS IT.",
+            "KEEP YOUR DISTANCE AND NEVER STOP SHOOTING. WHEN IT FALLS, IT EXPLODES, AND TAKES THE HORDE WITH IT.",
+        ),
+    }
+}
+
+/// The player, as the game knows him. The outbreak began in 2028, and it is now 2032.
+pub const HERO_NAME: &str = "FRANTIŠEK OLIVER";
+pub const HERO_AGE: u32 = 29;
+pub const HERO_BORN: u32 = 2003;
+pub const HERO_FROM: &str = "SLOVAKIA";
+pub const OUTBREAK_YEAR: u32 = 2028;
+pub const THIS_YEAR: u32 = 2032;
+
+/// How long a leaper's jump lasts, how far it can carry, and how high it goes.
+pub const LEAP_TIME: f32 = 0.5;
+pub const LEAP_RANGE: f32 = 5.0;
+pub const LEAP_HEIGHT: f32 = 1.3;
+/// How close it has to land to get hold of someone, and where it then hangs on.
+pub const LATCH_RANGE: f32 = 1.25;
+pub const LATCH_DIST: f32 = 0.58;
+/// Seconds between a leaper's attempts.
+pub const LEAP_COOLDOWN: f32 = 4.0;
+
+/// Height above the ground at a point `k` of the way through a leap.
+pub fn leap_arc(k: f32) -> f32 {
+    let k = k.clamp(0.0, 1.0);
+    4.0 * LEAP_HEIGHT * k * (1.0 - k)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SKind {

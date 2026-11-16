@@ -58,6 +58,7 @@ struct Options {
     force_touch: bool,
     export_ost: Option<String>,
     export_stems: Option<(String, String)>,
+    portraits: Option<String>,
     dump_score: Option<String>,
     bench_music: bool,
 }
@@ -94,6 +95,7 @@ fn parse_args() -> Options {
         force_touch: false,
         export_ost: None,
         export_stems: None,
+        portraits: None,
         dump_score: None,
         bench_music: false,
     };
@@ -129,6 +131,7 @@ fn parse_args() -> Options {
                 o.export_stems = Some((track, next(&mut i)));
             }
             "--dump-score" => o.dump_score = Some(next(&mut i)),
+            "--portraits" => o.portraits = Some(next(&mut i)),
             "--bench-music" => o.bench_music = true,
             "--capture" => o.capture = Some(next(&mut i)),
             "--times" => o.times = next(&mut i).split(',').filter_map(|t| t.parse().ok()).collect(),
@@ -571,6 +574,112 @@ impl Running {
 }
 
 /// Renders the running game to PNG files with no window at all.
+/// Renders the bestiary's portraits and the survivor's, with the game's own renderer:
+/// `rotfall --portraits assets`. Each stands alone at dusk, lit like a specimen.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_portraits(dir: &str, o: &Options) {
+    use game::data::{ZKind, FIELD_GUIDE};
+    use glam::{vec3, Vec2, Vec3};
+    let size = (512u32, 640u32);
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
+    let gpu = pollster::block_on(Gpu::new(&instance, None)).expect("no GPU");
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("portrait"),
+        size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&Default::default());
+    let mut world = game::World::new(o.seed, Audio::silent());
+    let ground = world.map.bake_ground(GROUND_TEX);
+    // Rendered large and shown small: the menu scales these down, and that is all the smoothing they need.
+    let mut renderer = Renderer::new(gpu, format, size, 2.0, game::map::HALF, (&ground, GROUND_TEX));
+    let mut frame = FrameData::new();
+    // Out on the road, with the dark behind them.
+    let at = Vec2::new(0.0, 21.0);
+    let subjects: Vec<(String, Option<ZKind>)> =
+        FIELD_GUIDE.iter().map(|&k| (game::data::zinfo(k).name.to_lowercase(), Some(k))).chain([("survivor".to_string(), None)]).collect();
+    for (name, kind) in subjects {
+        world.zombies.clear();
+        // Nothing may stand between the subject and the lens.
+        world.barrels.clear();
+        world.night = 0.93;
+        world.time = 3.3;
+        let facing = Vec2::new(0.42, 0.91).normalize();
+        let mut height = 1.75;
+        let hide = vec3(60.0, 0.0, 60.0);
+        match kind {
+            Some(k) => {
+                world.spawn_zombie(k, at);
+                let z = &mut world.zombies[0];
+                z.spawn_t = 0.0;
+                z.facing = facing;
+                z.vel = facing * 1.2;
+                z.phase = 0.9;
+                z.scale = game::data::zdef(k).scale;
+                z.special_t = 0.0;
+                height *= z.scale;
+                match k {
+                    ZKind::Crawler => height = 0.75,
+                    ZKind::Leaper => {
+                        height = 1.05;
+                        z.charge_t = 0.5;
+                    }
+                    ZKind::Screamer => z.special_t = 4.0,
+                    ZKind::Brute | ZKind::Titan => z.attack_t = 0.12,
+                    _ => {}
+                }
+                let p = &mut world.players[0];
+                p.pos = hide;
+                p.flashlight = false;
+            }
+            None => {
+                let p = &mut world.players[0];
+                p.pos = vec3(at.x, 0.0, at.y);
+                p.facing = facing;
+                p.aim = p.pos + vec3(facing.x, 0.0, facing.y) * 8.0 + Vec3::Y * 1.2;
+                p.owned[2] = true;
+                p.weapon = 2;
+                p.flashlight = false;
+            }
+        }
+        let feet = vec3(at.x, 0.0, at.y);
+        let target = feet + Vec3::Y * height * 0.52;
+        let back = height * 2.25 + 0.6;
+        let eye = target + vec3(0.0, height * 0.18 + 0.25, back);
+        let cam = game::view::Camera::looking(eye, target, 34.0, size.0 as f32 / size.1 as f32);
+        frame.begin();
+        game::view::draw_world(&mut world, &cam, &mut frame, None);
+        frame.lights.clear();
+        frame.particles.clear();
+        frame.flashlight = None;
+        let k = height.max(1.0);
+        let mut light = |off: Vec3, radius: f32, color: [f32; 3]| {
+            frame.lights.push(render::PointLight { pos: (feet + off * k).to_array(), radius: radius * k, color, _pad: 0.0 });
+        };
+        // A warm key from the front and one side, the reactor's blue from behind, and a little fill.
+        light(vec3(-2.2, 2.4, 3.0), 9.0, [2.5, 1.9, 1.3]);
+        light(vec3(2.4, 1.9, -2.6), 8.0, [0.45, 1.5, 2.7]);
+        light(vec3(1.8, 0.5, 2.6), 6.0, [0.3, 0.26, 0.22]);
+        frame.mist = 0.5;
+        frame.exposure = 1.0;
+        frame.vignette = 1.6;
+        frame.damage = 0.0;
+        frame.chroma = 0.002;
+        frame.desaturate = 0.0;
+        renderer.render(&mut frame, &view, size);
+        let px = renderer.read_texture(&tex);
+        let path = format!("{dir}/portrait_{name}.png");
+        util::write_png(&path, size.0, size.1, &px).expect("write png");
+        println!("{path}");
+    }
+}
+
 fn run_capture(o: &Options) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
     let gpu = pollster::block_on(Gpu::new(&instance, None)).expect("no GPU");
@@ -607,6 +716,8 @@ fn run_capture(o: &Options) {
         "menu_extras" => Some(Page::Extras),
         "menu_gallery" => Some(Page::Gallery),
         "menu_ost" => Some(Page::Soundtrack),
+        "menu_bestiary" => Some(Page::Bestiary),
+        "menu_dossier" => Some(Page::Dossier),
         _ => None,
     };
     let mut scripted_client = false;
@@ -912,7 +1023,7 @@ fn main() {
     #[cfg(windows)]
     {
         let args: Vec<String> = std::env::args().collect();
-        let cli = ["--server", "--capture", "--bench", "--bench-music", "--export-ost", "--export-stems", "--dump-score", "--render-music", "--help", "-h"];
+        let cli = ["--server", "--capture", "--portraits", "--bench", "--bench-music", "--export-ost", "--export-stems", "--dump-score", "--render-music", "--help", "-h"];
         if args.iter().any(|a| cli.contains(&a.as_str())) {
             win::console();
         }
@@ -953,6 +1064,11 @@ fn main() {
     }
     if o.capture.is_some() {
         run_capture(&o);
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(dir) = &o.portraits {
+        run_portraits(dir, &o);
         return;
     }
     if o.bench > 0.0 {

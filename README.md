@@ -9,6 +9,9 @@
 A top-down, third-person 3D wave survival shooter, written in Rust. Hold the reactor against
 an endless horde: build walls and traps, deploy sentries, buy bigger guns, and keep moving.
 
+The outbreak began in 2028. It is now 2032, and you are František Oliver, 29, from Slovakia, the one
+still keeping a reactor running while the dead come for it every night.
+
 **[Play in your browser](https://1stwbsm.github.io/rotfall/)** with nothing to install, or
 **[download it for Windows or Linux](https://github.com/1stwbsm/rotfall/releases/latest)**.
 
@@ -109,8 +112,10 @@ Things to know about the network design:
 - **18 guns**: sidearm, SMG, rifle, pump and auto shotguns, magnum, twin SMGs, sniper, LMG, grenade
   launcher, rocket launcher, flamethrower, freeze gun, chain lightning, bouncing sawblades, beam
   laser, spin-up minigun, railgun.
-- **8 zombies**: walkers, runners, crawlers, exploding bloaters, acid spitters, charging brutes,
-  screamers that enrage the crowd, and a Titan boss every fifth wave. Limbs come off, and a zombie
+- **9 zombies**: walkers, runners, crawlers, exploding bloaters, acid spitters, charging brutes,
+  screamers that enrage the crowd, leapers, and a Titan boss every fifth wave. A leaper circles out
+  of reach, then sprints in and jumps: if it lands on you it holds on and bites, and you can't move
+  until you shoot it off. Roll as it jumps and it lands stunned. Limbs come off, and a zombie
   that loses a leg keeps coming as a crawler.
 - **16 structures**: wood and steel walls, gates, spike traps, razor wire, mines, seven sentry
   types (MG, scatter, flame, tesla, gatling, rocket, mortar; each upgrades twice), floodlights,
@@ -140,7 +145,8 @@ During a run, each song picks up where it left off instead of replaying its open
 
 ## Extras
 
-The main menu's Extras page has a gallery of art and screenshots and the soundtrack, where you can listen
+The main menu's Extras page has a bestiary with every kind of zombie and how to kill it, a dossier on
+the player, a gallery of art and screenshots and the soundtrack, where you can listen
 to every track and download it as a WAV. On the desktop, downloads go to `Music/ROTFALL Soundtrack`; in a browser, "download all" builds a single
 zip.
 `rotfall --export-ost FOLDER` writes the whole album.
@@ -149,11 +155,11 @@ zip.
 
 | Path | What it is |
 | --- | --- |
-| `src/render/` | **Custom renderer.** wgpu is used only as the GPU API. Forward HDR shading with a CPU-binned world-space light grid, sun and flashlight shadow maps, instancing, MSAA, a persistent world-space decal layer, billboard particles, a bloom pyramid, tonemapping, and a bitmap-font UI batcher. All meshes are built procedurally in `mesh.rs`. |
+| `src/render/` | **Custom renderer.** wgpu is used only as the GPU API. Forward HDR shading with a CPU-binned world-space light grid, soft sun and flashlight shadow maps, ambient occlusion from an overhead depth map, grain and grime projected onto every model, ground mist lit by nearby lights, instancing, MSAA, a persistent world-space decal layer, billboard particles, a bloom pyramid, tonemapping, and a bitmap-font UI batcher. All meshes are built procedurally in `mesh.rs`. |
 | `src/ragdoll.rs` | **Custom ragdoll engine.** Position-based dynamics on a 16-joint skeleton, with joint limits, torso bracing, breakable limbs, partial bodies, static collision, pile-ups and sleeping. Living characters are posed on the same skeleton, so death hands over with no visible pop. |
 | `src/audio/` | **Soundtrack and SFX.** Eleven original tracks of orchestral techno, written as note data and synthesized live with no samples. See [The soundtrack](#the-soundtrack). Layers follow the battle's intensity. All effects, including the menu sounds, are synthesized at startup. Output goes through a small runtime-loaded ALSA binding. |
 | `src/game/` | Simulation: flow-field navigation, zombie AI, combat, base building, waves, HUD, and a bot that plays the game. `net.rs` is the co-op protocol and `save.rs` the save format. |
-| `tools/menu_scene.py` | **Art.** A Blender scene built entirely from script: the menu background and logo, the thumbnails in `assets/`, and the icon. `tools/render_menu_art.sh` re-renders them all. |
+| `tools/menu_scene.py` | **Art.** A Blender scene built entirely from script: the menu background and logo, the thumbnails in `assets/`, and the icon. `tools/render_menu_art.sh` re-renders them all. The bestiary portraits are the game's own renderer: `tools/make_portraits.sh`. |
 
 Dependencies are limited to `wgpu`, `winit`, `glam`, `bytemuck`, `pollster`, `libc` and `png`.
 

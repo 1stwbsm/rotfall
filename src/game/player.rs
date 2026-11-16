@@ -95,6 +95,8 @@ pub struct Player {
     /// Seconds left of the stand-up animation, and the pose it starts from.
     /// How long this knockdown has lasted so far.
     pub down_for: f32,
+    /// A leaper has hold of them: no moving, and nothing to shoot at but it.
+    pub latched: bool,
     pub getup_t: f32,
     pub getup_from: Pose,
     pub death_cause: DeathCause,
@@ -158,6 +160,7 @@ impl Player {
             net_target: Vec2::ZERO,
             down_t: 0.0,
             down_for: 0.0,
+            latched: false,
             getup_t: 0.0,
             getup_from: [Vec3::ZERO; JOINTS],
             death_cause: DeathCause::Regular,
@@ -331,7 +334,11 @@ impl World {
         }
         p.aim = input.aim;
 
-        if !p.remote {
+        if p.latched {
+            // Held fast. All that is left is to turn, and to shoot.
+            p.vel = Vec2::ZERO;
+            p.roll_t = 0.0;
+        } else if !p.remote {
             self.player_move(i, dt, input);
         }
         let p = &mut self.players[i];
@@ -417,7 +424,7 @@ impl World {
             }
         }
 
-        if input.grenade && self.players[i].grenades > 0 && self.players[i].grenade_cd <= 0.0 {
+        if input.grenade && self.players[i].grenades > 0 && self.players[i].grenade_cd <= 0.0 && !self.players[i].latched {
             self.throw_grenade(i);
         }
 
@@ -502,6 +509,23 @@ impl World {
         let loud = matches!(def.fire, Fire::Flame | Fire::Cryo | Fire::Beam);
         if !loud || cooldown <= 0.0 || self.time.rem_euclid(0.18) < 0.02 {
             self.snd(def.sfx, from, 0.75);
+        }
+        // With a leaper on your chest there is only one thing any gun can hit, and it can't miss.
+        if self.players[i].latched
+            && let Some(zi) = self.zombies.iter().position(|z| z.latch == i as i8)
+        {
+            let hits = if let Fire::Hitscan { pellets, .. } = def.fire { pellets as f32 } else { 1.0 };
+            let at = self.zombies[zi].pos + Vec3::Y * 1.25;
+            self.fx.muzzle_flash(from, dir, 0.35 + def.kick * 0.5, vec3(1.0, 0.72, 0.36));
+            self.damage_zombie(zi, def.damage * hits, at, dir, 0.0, def.gore.max(0.3), false);
+            let z = &mut self.zombies[zi];
+            match def.fire {
+                Fire::Flame => z.burn = z.burn.max(3.0),
+                Fire::Cryo => z.frost += 0.5,
+                Fire::Tesla { .. } => z.stun = z.stun.max(0.6),
+                _ => {}
+            }
+            return;
         }
         match def.fire {
             Fire::Hitscan { pellets, spread, pierce } => {

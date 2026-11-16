@@ -21,7 +21,8 @@ use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
-pub const PROTOCOL: u16 = 3;
+// 4 was the short-lived 1.0.3, which sent its snapshots differently.
+pub const PROTOCOL: u16 = 5;
 pub const DEFAULT_PORT: u16 = 27416;
 pub const BEACON_PORT: u16 = 27417;
 const SNAP_INTERVAL: f32 = 1.0 / 30.0;
@@ -532,7 +533,7 @@ fn write_snapshot(world: &World, player: usize, complete: bool, known: &mut Hash
     // Players.
     w.u8(world.players.len() as u8);
     for (i, p) in world.players.iter().enumerate() {
-        let f = u8::from(p.alive) | u8::from(p.connected) << 1 | u8::from(p.out) << 2 | u8::from(p.roll_t > 0.0) << 3 | u8::from(p.on_depot) << 4 | u8::from(p.down_t > 0.0) << 5;
+        let f = u8::from(p.alive) | u8::from(p.connected) << 1 | u8::from(p.out) << 2 | u8::from(p.roll_t > 0.0) << 3 | u8::from(p.on_depot) << 4 | u8::from(p.down_t > 0.0) << 5 | u8::from(p.latched) << 6;
         w.u8(f);
         w.q2(p.pos2());
         w.q2(p.vel);
@@ -587,6 +588,8 @@ fn write_snapshot(world: &World, player: usize, complete: bool, known: &mut Hash
             | u8::from(z.rage > 0.0) << 2
             | u8::from(z.flash > 0.3) << 3
             | u8::from(z.crawling) << 4
+            | u8::from(z.leap_t > 0.0) << 5
+            | u8::from(z.latch >= 0) << 6
             | u8::from(new) << 7;
         w.u8(bits);
         w.q2(z.pos2());
@@ -726,6 +729,13 @@ fn apply_snapshot(w: &mut World, r: &mut Reader) -> Option<()> {
         p.hurt = p.hurt.max(hurt);
         p.net_target = pos;
         let down = f & 32 != 0;
+        p.latched = f & 64 != 0;
+        if p.latched && i == local {
+            // Held where the host says, so that the leaper is on this player and not beside them.
+            p.pos.x = pos.x;
+            p.pos.z = pos.y;
+            p.vel = Vec2::ZERO;
+        }
         let was_down = p.down_t > 0.0;
         if !down && was_down {
             w.finish_knockdown(i);
@@ -853,6 +863,13 @@ fn apply_snapshot(w: &mut World, r: &mut Reader) -> Option<()> {
         z.spawn_t = spawn;
         z.missing = missing;
         z.crawling = bits & 16 != 0;
+        // The arc of a leap is replayed here from the moment it is first heard of.
+        if bits & 32 == 0 {
+            z.leap_t = 0.0;
+        } else if z.leap_t <= 0.0 {
+            z.leap_t = LEAP_TIME;
+        }
+        z.latch = if bits & 64 != 0 { 0 } else { -1 };
         z.attack_t = if bits & 1 != 0 { z.attack_t.max(0.01) } else { 0.0 };
         z.burn = if bits & 2 != 0 { 1.0 } else { 0.0 };
         z.rage = if bits & 4 != 0 { 1.0 } else { 0.0 };
@@ -946,7 +963,9 @@ pub fn update_client(w: &mut World, dt: f32, input: &PlayerInput) {
                 p.facing = aim2.normalize();
             }
             p.aim = input.aim;
-            w.player_move(local, dt, input);
+            if !p.latched {
+                w.player_move(local, dt, input);
+            }
         }
     }
     for z in &mut w.zombies {
@@ -963,6 +982,10 @@ pub fn update_client(w: &mut World, dt: f32, input: &PlayerInput) {
         z.phase += mv * if z.kind == ZKind::Runner { 1.7 } else { 2.6 } / z.scale;
         z.pos.x = next.x;
         z.pos.z = next.y;
+        if z.kind == ZKind::Leaper {
+            z.leap_t = (z.leap_t - dt).max(0.0);
+            z.pos.y = if z.leap_t > 0.0 { leap_arc(1.0 - z.leap_t / LEAP_TIME) } else { 0.0 };
+        }
     }
     for s in &mut w.structures {
         s.flash = (s.flash - dt * 4.0).max(0.0);
@@ -1340,7 +1363,7 @@ impl Server {
                 let p = world.players.get_mut(idx)?;
                 let down = p.alive && p.down_t > 0.0;
                 // Ignore stale positions sent before the client heard about a respawn.
-                if p.alive && p.down_t <= 0.0 && p.getup_t <= 0.0 && seq == p.respawn_seq {
+                if p.alive && p.down_t <= 0.0 && p.getup_t <= 0.0 && !p.latched && seq == p.respawn_seq {
                     let lim = super::map::HALF - 1.0;
                     let q = pos.clamp(Vec2::splat(-lim), Vec2::splat(lim));
                     p.pos.x = q.x;
@@ -2244,6 +2267,48 @@ mod tests {
         assert_eq!(cw.players[1].death_cause, DeathCause::Explosion);
         assert_eq!(cw.ragdolls.bodies.iter().filter(|b| b.owner == 1).count(), 1, "one body, not two");
         assert_eq!(cw.wave_track_for_test(), crate::audio::Track::Smitherines, "the client hears its own death");
+    }
+
+    #[test]
+    fn a_leaper_holds_a_client_and_everyone_sees_it() {
+        let mut rig = Rig::new(ServerConfig::default());
+        rig.join("kay", "").unwrap();
+        rig.run(10);
+        rig.host.structures.retain(|s| s.kind == SKind::Core);
+        rig.host.rebuild_tiles();
+        let at = rig.host.players[1].pos2() + Vec2::new(0.6, 0.0);
+        rig.host.spawn_zombie(ZKind::Leaper, at);
+        let z = rig.host.zombies.last_mut().unwrap();
+        z.spawn_t = 0.0;
+        z.leap_t = 0.05;
+        rig.run(12);
+        assert!(rig.host.players[1].latched, "the host should have it on the client's player");
+        let (cw, _) = &rig.clients[0];
+        assert!(cw.players[1].latched, "the client should know it is held");
+        let leaper = cw.zombies.iter().find(|z| z.kind == ZKind::Leaper).expect("the client should see the leaper");
+        assert!(leaper.latch >= 0, "and see it holding on");
+        // Walking gets the client nowhere, on either machine.
+        let (host_at, client_at) = (rig.host.players[1].pos, cw.players[1].pos);
+        let walk = PlayerInput { move_dir: Vec2::X, aim: vec3(50.0, 1.2, 5.0), ..Default::default() };
+        for _ in 0..15 {
+            rig.step(PlayerInput::default(), walk);
+            std::thread::sleep(Duration::from_micros(300));
+        }
+        assert!(rig.host.players[1].latched);
+        assert!(rig.host.players[1].pos.distance(host_at) < 0.01);
+        assert!(rig.clients[0].0.players[1].pos.distance(client_at) < 0.6);
+        // The client's own gun gets it off, fired on the host as all shots are.
+        let shoot = PlayerInput { fire: true, aim: vec3(50.0, 1.2, 5.0), ..Default::default() };
+        for _ in 0..120 {
+            rig.step(PlayerInput::default(), shoot);
+            std::thread::sleep(Duration::from_micros(300));
+            if !rig.host.zombies.iter().any(|z| z.kind == ZKind::Leaper) {
+                break;
+            }
+        }
+        assert!(!rig.host.zombies.iter().any(|z| z.kind == ZKind::Leaper), "the client could not shoot it off");
+        rig.run(10);
+        assert!(!rig.host.players[1].latched && !rig.clients[0].0.players[1].latched);
     }
 
     #[test]

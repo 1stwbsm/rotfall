@@ -3,6 +3,7 @@ struct Globals {
     view_proj: mat4x4<f32>,
     sun_vp: mat4x4<f32>,
     flash_vp: mat4x4<f32>,
+    sky_vp: mat4x4<f32>,
     cam_pos: vec4<f32>,   // w = time
     sun_dir: vec4<f32>,
     sun_color: vec4<f32>,
@@ -13,7 +14,7 @@ struct Globals {
     flash_dir: vec4<f32>, // w = cos outer
     flash_color: vec4<f32>, // w = cos inner
     grid: vec4<f32>,      // origin x, origin z, cell size, dimension
-    map: vec4<f32>,       // half extent, ground half extent, -, -
+    map: vec4<f32>,       // half extent, ground half extent, ground mist 0..1, -
 };
 
 struct Light { pos_radius: vec4<f32>, color: vec4<f32> };
@@ -30,6 +31,8 @@ const GRID_STRIDE: u32 = 17u;
 @group(0) @binding(8) var detail_tex: texture_2d<f32>;
 @group(0) @binding(9) var linear_clamp: sampler;
 @group(0) @binding(10) var linear_wrap: sampler;
+// Depth from straight overhead: what the sky can see, and so what it cannot.
+@group(0) @binding(11) var sky_map: texture_depth_2d;
 
 struct VIn {
     @location(0) pos: vec3<f32>,
@@ -47,6 +50,10 @@ struct VOut {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) emissive: f32,
+    // Position and normal in the mesh's own space, at world scale, so that surface grain stays
+    // stuck to a thing as it moves.
+    @location(4) local: vec3<f32>,
+    @location(5) onormal: vec3<f32>,
 };
 
 @vertex
@@ -69,6 +76,8 @@ fn vs_main(v: VIn) -> VOut {
     o.color = authored * authored;
     // Vertex alpha is an emissive mask; instance alpha is its strength (plus a base glow when > 1).
     o.emissive = v.color.a * v.tint.a;
+    o.local = v.pos * vec3<f32>(length(c0), length(c1), length(c2));
+    o.onormal = v.normal;
     return o;
 }
 
@@ -76,12 +85,32 @@ fn sun_shadow(p: vec3<f32>, n: vec3<f32>) -> f32 {
     let lp = g.sun_vp * vec4<f32>(p + n * 0.05, 1.0);
     let uv = vec2<f32>(lp.x * 0.5 + 0.5, 0.5 - lp.y * 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || lp.z > 1.0) { return 1.0; }
-    let t = 1.0 / 2048.0;
-    var s = textureSampleCompareLevel(sun_map, shadow_sampler, uv + vec2<f32>(-t, -t) * 0.7, lp.z);
-    s += textureSampleCompareLevel(sun_map, shadow_sampler, uv + vec2<f32>(t, -t) * 0.7, lp.z);
-    s += textureSampleCompareLevel(sun_map, shadow_sampler, uv + vec2<f32>(-t, t) * 0.7, lp.z);
-    s += textureSampleCompareLevel(sun_map, shadow_sampler, uv + vec2<f32>(t, t) * 0.7, lp.z);
-    return s * 0.25;
+    // Nine filtered taps: a penumbra a few texels wide instead of a hard, stepped edge.
+    let t = 1.25 / 2048.0;
+    var s = 0.0;
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            s += textureSampleCompareLevel(sun_map, shadow_sampler, uv + vec2<f32>(f32(x), f32(y)) * t, lp.z);
+        }
+    }
+    return s / 9.0;
+}
+
+// How much of the sky a point can see, from a depth map drawn looking straight down. Under a body,
+// at the foot of a wall or deep in a crowd the answer is "not much", and that is what puts things
+// on the ground instead of floating over it.
+fn sky_vis(p: vec3<f32>, n: vec3<f32>) -> f32 {
+    let q = p + n * 0.16 + vec3<f32>(0.0, 0.14, 0.0);
+    let lp = g.sky_vp * vec4<f32>(q, 1.0);
+    let uv = vec2<f32>(lp.x * 0.5 + 0.5, 0.5 - lp.y * 0.5);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || lp.z > 1.0) { return 1.0; }
+    let t = 1.7 / 512.0;
+    var s = textureSampleCompareLevel(sky_map, shadow_sampler, uv, lp.z) * 2.0;
+    s += textureSampleCompareLevel(sky_map, shadow_sampler, uv + vec2<f32>(-t, -t), lp.z);
+    s += textureSampleCompareLevel(sky_map, shadow_sampler, uv + vec2<f32>(t, -t), lp.z);
+    s += textureSampleCompareLevel(sky_map, shadow_sampler, uv + vec2<f32>(-t, t), lp.z);
+    s += textureSampleCompareLevel(sky_map, shadow_sampler, uv + vec2<f32>(t, t), lp.z);
+    return s / 6.0;
 }
 
 fn flash_light(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
@@ -98,7 +127,12 @@ fn flash_light(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let lp = g.flash_vp * vec4<f32>(p + n * 0.06, 1.0);
     let z = lp.z / lp.w;
     let uv = vec2<f32>(lp.x / lp.w * 0.5 + 0.5, 0.5 - lp.y / lp.w * 0.5);
-    let s = textureSampleCompareLevel(flash_map, shadow_sampler, uv, z);
+    let t = 0.9 / 1024.0;
+    var s = textureSampleCompareLevel(flash_map, shadow_sampler, uv + vec2<f32>(-t, -t), z);
+    s += textureSampleCompareLevel(flash_map, shadow_sampler, uv + vec2<f32>(t, -t), z);
+    s += textureSampleCompareLevel(flash_map, shadow_sampler, uv + vec2<f32>(-t, t), z);
+    s += textureSampleCompareLevel(flash_map, shadow_sampler, uv + vec2<f32>(t, t), z);
+    s *= 0.25;
     let a = 1.0 - d / g.flash_pos.w;
     return g.flash_color.rgb * nl * cone * cone * a * a * s;
 }
@@ -111,11 +145,17 @@ fn grid_cell(p: vec3<f32>) -> i32 {
     return cz * dim + cx;
 }
 
-fn shade(p: vec3<f32>, n: vec3<f32>, albedo: vec3<f32>, spec_amount: f32, gloss: f32) -> vec3<f32> {
+// A lit surface, and the light that fell on it, which the mist needs to glow by.
+struct Lit { color: vec3<f32>, light: vec3<f32> };
+
+fn shade(p: vec3<f32>, n: vec3<f32>, albedo: vec3<f32>, spec_amount: f32, gloss: f32) -> Lit {
     let v = normalize(g.cam_pos.xyz - p);
     let hemi = n.y * 0.5 + 0.5;
-    var diff = mix(g.amb_ground.rgb, g.amb_sky.rgb, hemi);
+    let vis = sky_vis(p, n);
+    let ao = 0.3 + 0.7 * vis;
+    var diff = mix(g.amb_ground.rgb, g.amb_sky.rgb, hemi) * ao;
     var spec = vec3<f32>(0.0);
+    var local = vec3<f32>(0.0);
 
     let ndl = max(dot(n, g.sun_dir.xyz), 0.0);
     if (ndl > 0.0) {
@@ -142,29 +182,59 @@ fn shade(p: vec3<f32>, n: vec3<f32>, albedo: vec3<f32>, spec_amount: f32, gloss:
                 let l = to * inv;
                 let k = 1.0 - d2 / r2;
                 let att = k * k;
-                diff += li.color.rgb * att * (max(dot(n, l), 0.0) * 0.9 + 0.1);
+                local += li.color.rgb * att * (max(dot(n, l), 0.0) * 0.9 + 0.1);
                 let h = normalize(l + v);
                 spec += li.color.rgb * att * pow(max(dot(n, h), 0.0), gloss);
             }
         }
     }
+    // Lamps and fires have no shadows of their own. Losing some of them where the sky is hidden
+    // stands in for the contact shadows they would cast.
+    diff += local * (0.5 + 0.5 * vis);
 
     let rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
-    return albedo * diff + spec * spec_amount + (g.amb_sky.rgb * 1.6 + fl * 0.3) * rim * 0.35 * albedo;
+    // Everything shines more at a glancing angle.
+    let glance = 0.7 + 1.5 * rim;
+    var o: Lit;
+    o.color = albedo * diff + spec * spec_amount * glance * (0.4 + 0.6 * vis) + (g.amb_sky.rgb * 1.6 * ao + fl * 0.3) * rim * 0.35 * albedo;
+    o.light = diff;
+    return o;
 }
 
-fn apply_fog(c: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
+// Mist lying on the ground, drifting, and lit by whatever is near it; then the dark beyond the map.
+fn atmosphere(c: vec3<f32>, p: vec3<f32>, light: vec3<f32>) -> vec3<f32> {
+    let t = g.cam_pos.w;
+    let n1 = textureSampleLevel(detail_tex, linear_wrap, p.xz * 0.019 + vec2<f32>(t * 0.007, t * 0.002), 0.0).g;
+    let n2 = textureSampleLevel(detail_tex, linear_wrap, p.xz * 0.043 + vec2<f32>(-t * 0.004, t * 0.008), 0.0).g;
+    let low = exp(-max(p.y, 0.0) * 0.85);
+    let m = smoothstep(0.38, 0.72, n1 * 0.6 + n2 * 0.4) * low * g.map.z;
+    // It takes its colour from the light that reaches it, so a flashlight beam shows in it, but it
+    // is never brighter than a pale surface would be: this is haze, not smoke.
+    // Haze only ever lifts what is behind it. Pulling a bright surface down towards it would
+    // leave dark blotches on the ground, which read as dirt rather than air.
+    let glow = min(light, vec3<f32>(1.3)) * vec3<f32>(0.16, 0.18, 0.21);
+    let hazy = mix(c, max(c, glow), m * 0.3);
     let e = max(abs(p.x), abs(p.z));
     let edge = clamp((e - g.map.x * 0.82) / (g.map.x * 0.3), 0.0, 1.0);
-    return mix(c, g.fog.rgb, edge * edge);
+    return mix(hazy, g.fog.rgb, edge * edge);
 }
 
 @fragment
 fn fs_main(i: VOut) -> @location(0) vec4<f32> {
-    let n = normalize(i.normal);
-    var c = shade(i.world, n, i.color, 0.25, 32.0);
-    c += i.color * i.emissive;
-    return vec4<f32>(apply_fog(c, i.world), 1.0);
+    // Grain, blotches and a rougher surface, projected from three sides so that nothing stretches.
+    let w0 = abs(i.onormal);
+    let w = w0 / (w0.x + w0.y + w0.z + 1e-4);
+    let q = i.local * 0.6;
+    let d = textureSample(detail_tex, linear_wrap, q.yz) * w.x
+          + textureSample(detail_tex, linear_wrap, q.xz) * w.y
+          + textureSample(detail_tex, linear_wrap, q.xy) * w.z;
+    let n = normalize(normalize(i.normal) + (d.bar - 0.5) * 0.3);
+    // Dirt gathers low down, where things meet the ground.
+    let low = 0.82 + 0.18 * smoothstep(0.0, 0.8, i.world.y);
+    let albedo = i.color * (0.66 + 0.36 * d.r + 0.34 * d.g) * low;
+    let lit = shade(i.world, n, albedo, 0.1 + 0.34 * d.g, 26.0);
+    let c = lit.color + i.color * i.emissive;
+    return vec4<f32>(atmosphere(c, i.world, lit.light), 1.0);
 }
 
 // Ghost preview for base building: additive and pulsing.
@@ -211,8 +281,8 @@ fn fs_ground(i: GOut) -> @location(0) vec4<f32> {
     albedo = mix(albedo, decal.rgb, wet);
     if (wet > 0.25) { n = normalize(mix(n, vec3<f32>(0.0, 1.0, 0.0), wet)); }
     let spec_amount = base.a * 0.35 + wet * decal.r * 1.0;
-    let c = shade(p, n, albedo, spec_amount, 24.0 + wet * 48.0);
-    return vec4<f32>(apply_fog(c, p), 1.0);
+    let lit = shade(p, n, albedo, spec_amount, 24.0 + wet * 48.0);
+    return vec4<f32>(atmosphere(lit.color, p, lit.light), 1.0);
 }
 
 // ---------------------------------------------------------------- particles

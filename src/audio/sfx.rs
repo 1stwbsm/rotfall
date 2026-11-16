@@ -12,8 +12,10 @@ pub enum Sfx {
     Click, Horn, Clear, Pickup, Hurt, PlayerDeath, Dash, Buy, Denied,
     // Menu sounds never cross the network, so adding them does not affect the protocol.
     MenuHover, MenuSelect, MenuBack, MenuToggle, MenuTick, MenuConfirm, MenuError,
+    /// A leaper leaving the ground.
+    Leap,
 }
-pub const SFX_COUNT: usize = Sfx::MenuError as usize + 1;
+pub const SFX_COUNT: usize = Sfx::Leap as usize + 1;
 
 const ALL: [Sfx; SFX_COUNT] = {
     use Sfx::*;
@@ -25,6 +27,7 @@ const ALL: [Sfx; SFX_COUNT] = {
         Groan1, Groan2, Groan3, Groan4, Attack, Death1, Death2, BruteRoar, Spit, Scream, Pop, Boss,
         Click, Horn, Clear, Pickup, Hurt, PlayerDeath, Dash, Buy, Denied,
         MenuHover, MenuSelect, MenuBack, MenuToggle, MenuTick, MenuConfirm, MenuError,
+        Leap,
     ]
 };
 
@@ -283,6 +286,8 @@ fn generate(s: Sfx) -> Vec<f32> {
         BruteRoar => voice(id, 1.5, 62.0, 42.0, (320.0, 700.0), 0.6, 0.08),
         Spit => voice(id, 0.3, 260.0, 500.0, (1200.0, 2200.0), 0.7, 0.01),
         Scream => voice(id, 0.9, 520.0, 780.0, (1300.0, 2600.0), 0.3, 0.05),
+        // A short rising screech, cut off as it lands.
+        Leap => voice(id, 0.42, 380.0, 1150.0, (1500.0, 3100.0), 0.55, 0.015),
         Pop => {
             let mut v = explosion(id, 0.5, 900.0);
             v.iter_mut().for_each(|x| *x *= 0.9);

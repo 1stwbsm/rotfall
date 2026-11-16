@@ -30,6 +30,12 @@ impl Camera {
         Camera { focus: Vec3::ZERO, zoom: 1.0, punch: 1.0, eye: CAM_OFFSET, view_proj: Mat4::IDENTITY, inv: Mat4::IDENTITY, yaw: 0.0, yaw_home: false }
     }
 
+    /// A camera placed by hand, for portraits. The game's own camera always looks down from above.
+    pub fn looking(eye: Vec3, target: Vec3, fov_degrees: f32, aspect: f32) -> Self {
+        let view_proj = perspective_rh(fov_degrees.to_radians(), aspect, 0.3, 180.0) * look_at_rh(eye, target, Vec3::Y);
+        Camera { focus: target, zoom: 1.0, punch: 1.0, eye, view_proj, inv: view_proj.inverse(), yaw: 0.0, yaw_home: false }
+    }
+
     pub fn update(&mut self, target: Vec3, dt: f32, aspect: f32, shake: f32, time: f32) {
         self.focus = self.focus.lerp(target, (dt * 7.0).min(1.0));
         if self.yaw_home {
@@ -144,6 +150,14 @@ fn look_for(style: u32) -> BodyLook {
             l.pants = [0.32, 0.3, 0.3];
             l.girth = 0.85;
             l.eye_glow = 11.0;
+        }
+        9 => {
+            // Leaper: skinned-looking, all sinew, in what is left of dark clothes.
+            l.skin = [0.50, 0.24, 0.25];
+            l.shirt = [0.13, 0.10, 0.13];
+            l.pants = [0.08, 0.08, 0.10];
+            l.girth = 0.8;
+            l.eye_glow = 13.0;
         }
         8 => {
             // A dead player, back on their feet: their own kit over rotting skin.
@@ -366,6 +380,8 @@ pub fn draw_world(w: &mut World, cam: &Camera, frame: &mut FrameData, ghost: Opt
     frame.exposure = 1.0;
     frame.bloom = 0.11;
     frame.vignette = 2.1 - n * 0.4;
+    // Dust in the day, and at night a mist that the lamps and the flashlight pick out.
+    frame.mist = 0.3 + 0.4 * n;
     // Death closes in: the world dims and the edges darken over the first couple of seconds.
     if !w.me().alive {
         let k = (w.me().death_t * 0.6).min(1.0);

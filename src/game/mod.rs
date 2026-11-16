@@ -234,6 +234,7 @@ impl World {
         };
         w.place_starting_base();
         w.announce("FORTIFY THE REACTOR", [1.0, 0.8, 0.3], 4.0, true);
+        w.announce(&format!("{THIS_YEAR}. FOUR YEARS SINCE THE OUTBREAK."), [0.8, 0.8, 0.76], 6.0, false);
         w
     }
 
@@ -899,6 +900,134 @@ mod tests {
         w.update(0.016, &input);
         assert!(w.zombies.len() < 20);
         assert!(!w.ragdolls.bodies.is_empty() || w.stats.kills > 0);
+    }
+
+    /// A world with one leaper in it and nothing to interfere: the base's sentries hold their fire.
+    fn leaper_world(off: Vec2) -> World {
+        let mut w = world();
+        w.phase = Phase::Assault;
+        w.wave = 1;
+        w.spawn_budget = 50.0;
+        w.spawn_dirs = vec![];
+        w.structures.retain(|s| s.kind == SKind::Core);
+        w.rebuild_tiles();
+        let at = w.players[0].pos2() + off;
+        w.spawn_zombie(ZKind::Leaper, at);
+        w.zombies[0].spawn_t = 0.0;
+        w.zombies[0].special_t = 0.0;
+        w
+    }
+
+    fn run(w: &mut World, frames: u32, input: &player::PlayerInput) {
+        for _ in 0..frames {
+            w.update(1.0 / 60.0, input);
+        }
+    }
+
+    #[test]
+    fn a_leaper_keeps_its_distance_until_it_is_ready() {
+        let mut w = leaper_world(Vec2::new(5.0, 0.0));
+        let idle = player::PlayerInput { aim: vec3(0.0, 1.2, 30.0), ..Default::default() };
+        run(&mut w, 120, &idle);
+        let gap = w.zombies[0].pos2().distance(w.players[0].pos2());
+        assert!(gap > 7.0, "it should have backed off, but is {gap} away");
+        assert!(!w.players[0].latched && w.players[0].hp == w.players[0].max_hp);
+    }
+
+    #[test]
+    fn a_leaper_charges_leaps_and_holds_on_until_it_is_shot_off() {
+        let mut w = leaper_world(Vec2::new(8.0, 0.0));
+        w.zombies[0].special_t = LEAP_COOLDOWN + 0.1;
+        let idle = player::PlayerInput { aim: vec3(0.0, 1.2, 30.0), ..Default::default() };
+        let mut flew = false;
+        for _ in 0..240 {
+            w.update(1.0 / 60.0, &idle);
+            flew |= w.zombies[0].pos.y > 0.5;
+            if w.players[0].latched {
+                break;
+            }
+        }
+        assert!(flew, "it never left the ground");
+        assert!(w.players[0].latched, "it never caught the player");
+        let hp = w.players[0].hp;
+        assert!(hp < w.players[0].max_hp, "landing should hurt");
+        // No walking, rolling or throwing things. Turning is all that is left, and it turns with you.
+        let at = w.players[0].pos;
+        let grenades = w.players[0].grenades;
+        let flail = player::PlayerInput { move_dir: Vec2::X, sprint: true, dodge: true, grenade: true, aim: vec3(-30.0, 1.2, 0.0), ..Default::default() };
+        run(&mut w, 30, &flail);
+        assert!(w.players[0].pos.distance(at) < 0.01, "a held player must not move");
+        assert_eq!(w.players[0].grenades, grenades);
+        assert!(w.players[0].hp < hp, "and it keeps biting");
+        assert!(w.players[0].facing.x < -0.9, "the player can still turn");
+        let z = &w.zombies[0];
+        assert!((z.pos2() - w.players[0].pos2()).normalize().dot(w.players[0].facing) > 0.95, "the leaper rides on their front");
+        // Any shot at all hits it, whichever way the gun points.
+        w.players[0].hp = w.players[0].max_hp;
+        let shoot = player::PlayerInput { fire: true, aim: vec3(0.0, 1.2, -30.0), ..Default::default() };
+        for _ in 0..90 {
+            w.update(1.0 / 60.0, &shoot);
+            if w.zombies.is_empty() {
+                break;
+            }
+        }
+        assert!(w.zombies.is_empty(), "the sidearm should have killed it");
+        w.update(1.0 / 60.0, &idle);
+        assert!(!w.players[0].latched);
+        let walk = player::PlayerInput { move_dir: Vec2::X, aim: vec3(30.0, 1.2, 0.0), ..Default::default() };
+        run(&mut w, 30, &walk);
+        assert!(w.players[0].pos.x > at.x + 1.0, "free to move again");
+    }
+
+    #[test]
+    fn a_roll_dodges_a_leap_and_leaves_the_leaper_stunned() {
+        for rolling in [false, true] {
+            let mut w = leaper_world(Vec2::new(0.6, 0.0));
+            let z = &mut w.zombies[0];
+            z.leap_t = 0.02;
+            z.vel = Vec2::ZERO;
+            w.players[0].roll_t = if rolling { 0.3 } else { 0.0 };
+            w.update(1.0 / 60.0, &player::PlayerInput { aim: vec3(0.0, 1.2, 30.0), ..Default::default() });
+            w.update(1.0 / 60.0, &player::PlayerInput { aim: vec3(0.0, 1.2, 30.0), ..Default::default() });
+            assert_eq!(w.players[0].latched, !rolling);
+            assert_eq!(w.zombies[0].stun > 0.5, rolling, "a miss should leave it open");
+        }
+    }
+
+    #[test]
+    fn a_knockdown_or_a_freeze_shakes_a_leaper_off() {
+        for cold in [false, true] {
+            let mut w = leaper_world(Vec2::new(0.6, 0.0));
+            w.zombies[0].leap_t = 0.02;
+            w.zombies[0].vel = Vec2::ZERO;
+            let idle = player::PlayerInput { aim: vec3(0.0, 1.2, 30.0), ..Default::default() };
+            run(&mut w, 2, &idle);
+            assert!(w.players[0].latched);
+            if cold {
+                w.zombies[0].frost = 2.0;
+            } else {
+                let from = w.players[0].pos + Vec3::X;
+                w.knock_down(0, from, 20.0);
+            }
+            run(&mut w, 3, &idle);
+            assert!(!w.players[0].latched && w.zombies[0].latch < 0);
+        }
+    }
+
+    #[test]
+    fn leapers_spawn_from_wave_six_and_never_stall_a_wave() {
+        assert!(SPAWN_KINDS.contains(&ZKind::Leaper));
+        assert_eq!(ZKind::from_u8(ZKind::Leaper as u8), Some(ZKind::Leaper));
+        // The top byte of a style picks the look, and 8 already means a risen player.
+        assert_ne!(ZKind::Leaper.style_tag() << 24, zombie::STYLE_TURNED);
+        // With the wave all but over, a leaper behind walls stops waiting and comes in.
+        let mut w = leaper_world(Vec2::new(10.0, 0.0));
+        w.spawn_budget = 0.0;
+        let idle = player::PlayerInput { aim: vec3(0.0, 1.2, 30.0), ..Default::default() };
+        let start = w.zombies[0].pos2().distance(w.players[0].pos2());
+        run(&mut w, 60, &idle);
+        let now = w.zombies.first().map_or(0.0, |z| z.pos2().distance(w.players[0].pos2()));
+        assert!(now < start - 1.0 || w.players[0].latched, "it hung back: {start} then {now}");
     }
 
     #[test]

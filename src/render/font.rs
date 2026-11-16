@@ -1,5 +1,5 @@
 //! Built-in 5x7 bitmap font and atlas builder (rows packed LSB-first in each column).
-const GLYPHS: [[u8; 5]; 64] = [
+const GLYPHS: [[u8; 5]; 66] = [
     [0x00, 0x00, 0x00, 0x00, 0x00], [0x00, 0x00, 0x5F, 0x00, 0x00], [0x00, 0x07, 0x00, 0x07, 0x00],
     [0x14, 0x7F, 0x14, 0x7F, 0x14], [0x24, 0x2A, 0x7F, 0x2A, 0x12], [0x23, 0x13, 0x08, 0x64, 0x62],
     [0x36, 0x49, 0x55, 0x22, 0x50], [0x00, 0x05, 0x03, 0x00, 0x00], [0x00, 0x1C, 0x22, 0x41, 0x00],
@@ -22,7 +22,12 @@ const GLYPHS: [[u8; 5]; 64] = [
     [0x07, 0x08, 0x70, 0x08, 0x07], [0x61, 0x51, 0x49, 0x45, 0x43], [0x00, 0x7F, 0x41, 0x41, 0x00],
     [0x02, 0x04, 0x08, 0x10, 0x20], [0x00, 0x41, 0x41, 0x7F, 0x00], [0x04, 0x02, 0x01, 0x02, 0x04],
     [0x40, 0x40, 0x40, 0x40, 0x40],
+    // The solid block's cell, and then a caron, which is drawn above a letter to make Š.
+    [0x00, 0x00, 0x00, 0x00, 0x00], [0x00, 0x01, 0x02, 0x01, 0x00],
 ];
+
+/// The mark over Š. It has a glyph of its own, which the text drawing code stacks on an S.
+pub const CARON: char = '\u{2c7}';
 
 pub const CELL_W: u32 = 6;
 pub const CELL_H: u32 = 8;
@@ -31,7 +36,7 @@ pub const ROWS: u32 = 5;
 pub const ATLAS_W: u32 = CELL_W * COLS;
 pub const ATLAS_H: u32 = CELL_H * ROWS;
 
-/// R8 atlas: 64 glyphs followed by a fully solid block used for flat UI quads.
+/// R8 atlas: the glyphs, with a fully solid block for flat UI quads in the cell after the first 64.
 pub fn build_atlas() -> Vec<u8> {
     let mut px = vec![0u8; (ATLAS_W * ATLAS_H) as usize];
     for (i, g) in GLYPHS.iter().enumerate() {
@@ -61,7 +66,7 @@ pub fn glyph_uv(c: char) -> ([f32; 2], [f32; 2]) {
     if !(0x20..0x60).contains(&code) {
         code = b'?' as u32;
     }
-    let i = code - 0x20;
+    let i = if c == CARON { 65 } else { code - 0x20 };
     let (cx, cy) = (i % COLS, i / COLS);
     let u0 = (cx * CELL_W) as f32 / ATLAS_W as f32;
     let v0 = (cy * CELL_H) as f32 / ATLAS_H as f32;

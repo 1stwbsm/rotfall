@@ -70,6 +70,8 @@ pub enum Page {
     Extras,
     Gallery,
     Soundtrack,
+    Bestiary,
+    Dossier,
 }
 
 /// Who owns the simulation on this machine.
@@ -245,6 +247,8 @@ pub struct App {
     /// A track being auditioned in the Extras menu.
     pub preview: Option<Track>,
     pub gallery_i: usize,
+    /// Which entry of the field guide is open.
+    pub guide_i: usize,
     /// Soundtrack files waiting to render, the one in progress, and what happened last.
     pub ost_queue: VecDeque<Track>,
     pub ost: Option<OstRender>,
@@ -339,6 +343,7 @@ impl App {
             toast: None,
             preview: None,
             gallery_i: 0,
+            guide_i: 0,
             ost_queue: VecDeque::new(),
             ost: None,
             ost_status: String::new(),
@@ -664,7 +669,7 @@ impl App {
                     }
                     self.page = match self.page {
                         Page::Host | Page::Join | Page::Connecting => Page::Multiplayer,
-                        Page::Gallery | Page::Soundtrack => Page::Extras,
+                        Page::Gallery | Page::Soundtrack | Page::Bestiary | Page::Dossier => Page::Extras,
                         _ => Page::Main,
                     };
                     self.focus = None;
@@ -1124,12 +1129,19 @@ impl App {
             frame.menu = Some(MenuView {
                 time: self.menu_t,
                 mouse: [raw.mouse.0 / w * 2.0 - 1.0, raw.mouse.1 / h * 2.0 - 1.0],
-                logo: match (self.page, super::hud::gallery_rect(self.gallery_i, size)) {
-                    (Page::Gallery, r) => r,
+                logo: match self.page {
+                    Page::Gallery => super::hud::gallery_rect(self.gallery_i, size),
+                    Page::Bestiary | Page::Dossier => super::hud::portrait_rect(self, size),
                     _ => super::hud::logo_rect(size),
                 },
                 dim: if self.page == Page::Gallery { 2.0 } else { 1.0 },
-                gallery: (self.page == Page::Gallery).then_some(self.gallery_i),
+                // The portraits follow the gallery's pictures: the nine kinds, then the survivor.
+                gallery: match self.page {
+                    Page::Gallery => Some(self.gallery_i),
+                    Page::Bestiary => Some(crate::render::GALLERY.len() + self.guide_i.min(FIELD_GUIDE.len() - 1)),
+                    Page::Dossier => Some(crate::render::GALLERY.len() + FIELD_GUIDE.len()),
+                    _ => None,
+                },
             });
         } else {
             let ghost = self.build_ghost();

@@ -69,7 +69,7 @@ impl Ui<'_> {
     }
 
     pub fn text_w(&self, t: &str, scale: f32) -> f32 {
-        t.len() as f32 * font::CELL_W as f32 * scale.round().max(1.0)
+        t.chars().count() as f32 * font::CELL_W as f32 * scale.round().max(1.0)
     }
 
     pub fn text(&mut self, x: f32, y: f32, scale: f32, t: &str, c: C) {
@@ -79,11 +79,17 @@ impl Ui<'_> {
         let (cw, ch) = (5.0 * scale, 7.0 * scale);
         let mut px = x0;
         for ch_ in t.chars() {
-            if ch_ != ' ' {
-                let (a, b) = font::glyph_uv(ch_);
+            // The font is capitals only, and Š is a capital S with its caron above the line.
+            let (letter, marked) = if matches!(ch_, 'Š' | 'š') { ('S', true) } else { (ch_, false) };
+            for (glyph, lift) in [(letter, 0.0), (font::CARON, 3.0 * scale)] {
+                if glyph == ' ' || (glyph == font::CARON && !marked) {
+                    continue;
+                }
+                let (a, b) = font::glyph_uv(glyph);
                 // The 5x7 glyph occupies the upper-left of its atlas cell.
                 let u1 = a[0] + (b[0] - a[0]) * 5.0 / (font::CELL_W - 1) as f32;
                 let v1 = a[1] + (b[1] - a[1]) * 7.0 / (font::CELL_H - 1) as f32;
+                let y0 = y0 - lift;
                 let vert = |vx, vy, u, v| UiVertex { pos: [vx, vy], uv: [u, v], color: c };
                 self.out.extend_from_slice(&[
                     vert(px, y0, a[0], a[1]),
@@ -415,6 +421,11 @@ fn ingame(app: &mut App, ui: &mut Ui) {
     }
     if !p.alive && app.screen == Screen::Playing {
         death_scene(world, ui);
+    } else if p.latched {
+        let pulse = 0.75 + 0.25 * (world.time * 14.0).sin();
+        ui.text_center(cx, h * 0.68, 3.0 * s, "LEAPER ON YOU", [1.0, 0.25 * pulse, 0.15 * pulse, 1.0]);
+        let prompt = if app.touch.enabled { "YOU CAN'T MOVE. HOLD FIRE TO SHOOT IT OFF" } else { "YOU CAN'T MOVE. SHOOT IT OFF" };
+        ui.text_center(cx, h * 0.68 + 30.0 * s, 1.0 * s, prompt, WHITE);
     } else if p.down_t > 0.0 {
         ui.text_center(cx, h * 0.68, 3.0 * s, "KNOCKED DOWN", [1.0, 0.6, 0.2, 1.0]);
         let prompt = if app.touch.enabled { "HELPLESS! MASH ROLL TO GET UP FASTER" } else { "HELPLESS! MASH SPACE TO GET UP FASTER" };
@@ -854,7 +865,11 @@ fn title(app: &mut App, ui: &mut Ui) {
     let top = logo[1] + logo[3] + 12.0 * s;
     let cw = (340.0 * s).min(w * 0.42);
     // A soft shadow behind the column keeps text readable over the bright parts of the art.
-    let edge = x + if app.page == Page::Soundtrack { 660.0 * s } else { cw + 30.0 * s };
+    let edge = match app.page {
+        Page::Soundtrack => x + 660.0 * s,
+        Page::Bestiary | Page::Dossier => w,
+        _ => x + cw + 30.0 * s,
+    };
     if app.page != Page::Gallery {
         ui.rect(0.0, 0.0, edge, h, [0.0, 0.0, 0.0, 0.42]);
     }
@@ -888,6 +903,8 @@ fn title(app: &mut App, ui: &mut Ui) {
         Page::Extras => page_extras(app, ui, x, top, cw),
         Page::Gallery => page_gallery(app, ui),
         Page::Soundtrack => page_soundtrack(app, ui, x, top, cw),
+        Page::Bestiary => page_bestiary(app, ui),
+        Page::Dossier => page_dossier(app, ui),
     }
     if let Some(e) = &app.menu_error {
         ui.text_shadow(x, h - 46.0 * s, 2.0 * s, e, RED);
@@ -1212,8 +1229,168 @@ fn page_extras(app: &mut App, ui: &mut Ui, x: f32, mut y: f32, cw: f32) {
     if menu_item(ui, x, y, cw, 42.0 * s, "GALLERY", "ART AND SCREENSHOTS", true) {
         app.page = Page::Gallery;
     }
+    y += 48.0 * s;
+    if menu_item(ui, x, y, cw, 42.0 * s, "BESTIARY", "EVERY KIND OF DEAD, AND HOW TO PUT IT DOWN", true) {
+        app.page = Page::Bestiary;
+    }
+    y += 48.0 * s;
+    if menu_item(ui, x, y, cw, 42.0 * s, "DOSSIER", "WHO YOU ARE, AND WHAT YEAR IT IS", true) {
+        app.page = Page::Dossier;
+    }
     y += 56.0 * s;
     back_item(app, ui, x, y, cw, Page::Main);
+}
+
+/// Where the bestiary and the dossier put their lists, pictures and text. Narrow windows stack the
+/// text under the picture; wide ones set it alongside.
+struct GuideLayout {
+    x: f32,
+    top: f32,
+    list_w: f32,
+    picture: [f32; 4],
+    text_x: f32,
+    text_y: f32,
+    text_w: f32,
+    /// How tall a backing the text gets, so that it reads over the bright parts of the art.
+    text_h: f32,
+}
+
+fn guide_layout(size: (u32, u32), s: f32, list: bool) -> GuideLayout {
+    let (w, h) = (size.0 as f32, size.1 as f32);
+    let logo = logo_rect(size);
+    let (x, top) = (logo[0] + 4.0 * s, logo[1] + 30.0 * s);
+    let list_w = if list { 150.0 * s } else { 0.0 };
+    let px = x + list_w + if list { 16.0 * s } else { 0.0 };
+    let room = h - top - 60.0 * s;
+    let wide = w - px > 560.0 * s;
+    // Four wide by five tall, as the pictures are.
+    let ph = if wide { room.min(400.0 * s) } else { (room * 0.5).min(260.0 * s) };
+    let pw = ph * 0.8;
+    let picture = [px, top, pw, ph];
+    if wide {
+        let text_x = px + pw + 20.0 * s;
+        GuideLayout { x, top, list_w, picture, text_x, text_y: top, text_w: (w - text_x - 20.0 * s).min(430.0 * s), text_h: ph }
+    } else {
+        let text_y = top + ph + 10.0 * s;
+        GuideLayout { x, top, list_w, picture, text_x: px, text_y, text_w: w - px - 12.0 * s, text_h: h - text_y - 24.0 * s }
+    }
+}
+
+/// The picture's place on the bestiary and dossier pages, for the renderer to fill.
+pub fn portrait_rect(app: &App, size: (u32, u32)) -> [f32; 4] {
+    guide_layout(size, ui_scale(app, size), app.page == Page::Bestiary).picture
+}
+
+/// Draws text broken into lines no wider than `width`. Returns the y below the last line.
+fn wrapped(ui: &mut Ui, x: f32, mut y: f32, width: f32, scale: f32, text: &str, c: C) -> f32 {
+    let px = font::CELL_W as f32 * scale.round().max(1.0);
+    let room = ((width / px) as usize).max(8);
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > room {
+            ui.text_shadow(x, y, scale, &line, c);
+            y += 11.0 * scale.round().max(1.0);
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        ui.text_shadow(x, y, scale, &line, c);
+        y += 11.0 * scale.round().max(1.0);
+    }
+    y
+}
+
+fn page_bestiary(app: &mut App, ui: &mut Ui) {
+    let s = ui.s;
+    let l = guide_layout((ui.w as u32, ui.h as u32), s, true);
+    ui.text_shadow(l.x, l.top - 26.0 * s, 2.0 * s, "BESTIARY", ACCENT);
+    let rh = 27.0 * s;
+    let mut y = l.top;
+    for (i, &k) in FIELD_GUIDE.iter().enumerate() {
+        let on = app.guide_i == i;
+        if on {
+            ui.rect(l.x, y, l.list_w, rh - 3.0 * s, PANEL_HI);
+        }
+        if menu_item(ui, l.x, y, l.list_w, rh - 3.0 * s, zinfo(k).name, "", true) {
+            app.guide_i = i;
+        }
+        y += rh;
+    }
+    y += 8.0 * s;
+    back_item(app, ui, l.x, y, l.list_w, Page::Extras);
+
+    let kind = FIELD_GUIDE[app.guide_i.min(FIELD_GUIDE.len() - 1)];
+    let (info, d) = (zinfo(kind), zdef(kind));
+    let p = l.picture;
+    ui.frame_rect(p[0] - 2.0, p[1] - 2.0, p[2] + 4.0, p[3] + 4.0, 2.0, [0.4, 0.38, 0.3, 0.8]);
+    let (x, mut y, tw) = (l.text_x, l.text_y, l.text_w);
+    ui.rect(x - 10.0 * s, y - 2.0, tw + 20.0 * s, l.text_h + 4.0, [0.0, 0.0, 0.0, 0.5]);
+    y += 8.0 * s;
+    ui.text_shadow(x, y, 3.0 * s, info.name, WHITE);
+    y += 27.0 * s;
+    ui.text_shadow(x, y, 1.0 * s, info.role, ACCENT);
+    y += 16.0 * s;
+    let seen = if kind == ZKind::Titan { "WAVE 5, AND EVERY FIFTH AFTER".to_string() } else { format!("WAVE {}", d.first_wave) };
+    ui.text_shadow(x, y, 1.0 * s, &format!("FIRST SEEN  {seen}"), DIM);
+    y += 18.0 * s;
+    // Measured against the worst of the ordinary dead, so the bars mean something next to each other.
+    let dps = d.damage / d.attack_time;
+    let bars = [("HEALTH", (d.hp / 620.0).sqrt(), RED), ("SPEED", d.speed / 5.2, BLUE), ("DAMAGE", dps / 30.0, ACCENT)];
+    let label_w = ui.text_w("DAMAGE  ", 1.0 * s);
+    for (name, k, c) in bars {
+        ui.text_shadow(x, y + 1.0 * s, 1.0 * s, name, WHITE);
+        ui.bar(x + label_w, y, (tw - label_w).min(190.0 * s), 9.0 * s, k, c);
+        y += 14.0 * s;
+    }
+    y += 8.0 * s;
+    y = wrapped(ui, x, y, tw, 1.0 * s, info.about, WHITE);
+    y += 8.0 * s;
+    ui.text_shadow(x, y, 1.0 * s, "HOW TO KILL IT", ACCENT);
+    y += 13.0 * s;
+    wrapped(ui, x, y, tw, 1.0 * s, info.advice, [0.85, 0.85, 0.8, 1.0]);
+}
+
+fn page_dossier(app: &mut App, ui: &mut Ui) {
+    let s = ui.s;
+    let l = guide_layout((ui.w as u32, ui.h as u32), s, false);
+    ui.text_shadow(l.x, l.top - 26.0 * s, 2.0 * s, "DOSSIER", ACCENT);
+    let p = l.picture;
+    ui.frame_rect(p[0] - 2.0, p[1] - 2.0, p[2] + 4.0, p[3] + 4.0, 2.0, [0.4, 0.38, 0.3, 0.8]);
+    let (x, mut y, tw) = (l.text_x, l.text_y, l.text_w);
+    ui.rect(x - 10.0 * s, y - 2.0, tw + 20.0 * s, l.text_h + 4.0, [0.0, 0.0, 0.0, 0.5]);
+    y += 12.0 * s;
+    ui.text_shadow(x, y, 3.0 * s, HERO_NAME, WHITE);
+    y += 27.0 * s;
+    ui.text_shadow(x, y, 1.0 * s, "THE ONE HOLDING THE REACTOR", ACCENT);
+    y += 20.0 * s;
+    let label_w = ui.text_w("STATUS  ", 1.0 * s);
+    let rows = [
+        ("AGE", HERO_AGE.to_string()),
+        ("BORN", HERO_BORN.to_string()),
+        ("FROM", HERO_FROM.to_string()),
+        ("STATUS", "ALIVE, SO FAR".to_string()),
+    ];
+    for (name, value) in rows {
+        ui.text_shadow(x, y, 1.0 * s, name, DIM);
+        ui.text_shadow(x + label_w, y, 1.0 * s, &value, WHITE);
+        y += 13.0 * s;
+    }
+    y += 12.0 * s;
+    let years = [
+        (OUTBREAK_YEAR, "THE OUTBREAK. THE DEAD GOT UP, AND THE WORLD THAT WAS ENDED."),
+        (THIS_YEAR, "NOW. FOUR YEARS ON THEY STILL COME EVERY NIGHT. THE REACTOR IS STILL RUNNING, AND HE MEANS TO KEEP IT THAT WAY."),
+    ];
+    let year_w = ui.text_w("2028  ", 1.0 * s);
+    for (year, text) in years {
+        ui.text_shadow(x, y, 1.0 * s, &year.to_string(), ACCENT);
+        y = wrapped(ui, x + year_w, y, tw - year_w, 1.0 * s, text, WHITE) + 6.0 * s;
+    }
+    y = (y + 8.0 * s).max(p[1] + p[3] + 14.0 * s).min(ui.h - 50.0 * s);
+    back_item(app, ui, l.x, y, 150.0 * s, Page::Extras);
 }
 
 fn page_gallery(app: &mut App, ui: &mut Ui) {
@@ -1545,6 +1722,10 @@ fn game_over(app: &mut App, ui: &mut Ui) {
     ui.text_center(w * 0.5, h * 0.14, 8.0 * s, head, [0.95, 0.15, 0.1, k]);
     if app.save_erased {
         ui.text_center(w * 0.5, h * 0.14 + 66.0 * s, 2.0 * s, "PERMADEATH: THIS RUN'S SAVE HAS BEEN ERASED", [1.0, 0.45, 0.35, k]);
+    }
+    if app.world.permadeath && !app.is_multiplayer() {
+        // One life, and this was it.
+        ui.text_center(w * 0.5, h * 0.14 + 88.0 * s, 2.0 * s, &format!("{HERO_NAME}  {HERO_BORN} - {THIS_YEAR}"), [0.9, 0.88, 0.8, k]);
     }
     let st = app.world.stats;
     let lines = [

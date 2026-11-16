@@ -18,6 +18,8 @@ pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SHADOW_SIZE: u32 = 2048;
 const FLASH_SHADOW_SIZE: u32 = 1024;
+/// The overhead depth map behind ambient occlusion. Coarse on purpose: its blur is the softness.
+const SKY_SIZE: u32 = 512;
 // The persistent gore layer is the largest texture in the game; browsers get a lighter one.
 #[cfg(not(target_arch = "wasm32"))]
 const DECAL_SIZE: u32 = 4096;
@@ -107,6 +109,21 @@ pub struct Flashlight {
     pub cos_inner: f32,
 }
 
+/// Portraits for the bestiary, in the field guide's order, and then the survivor's for the dossier.
+/// They are drawn in the same slot as the gallery's pictures, numbered on from the end of those.
+const PORTRAIT_FILES: [&[u8]; 10] = [
+    include_bytes!("../../assets/portrait_walker.png"),
+    include_bytes!("../../assets/portrait_runner.png"),
+    include_bytes!("../../assets/portrait_crawler.png"),
+    include_bytes!("../../assets/portrait_bloater.png"),
+    include_bytes!("../../assets/portrait_spitter.png"),
+    include_bytes!("../../assets/portrait_brute.png"),
+    include_bytes!("../../assets/portrait_leaper.png"),
+    include_bytes!("../../assets/portrait_screamer.png"),
+    include_bytes!("../../assets/portrait_titan.png"),
+    include_bytes!("../../assets/portrait_survivor.png"),
+];
+
 /// Asks for the title screen in place of the 3D scene.
 #[derive(Clone, Copy)]
 pub struct MenuView {
@@ -125,7 +142,7 @@ pub const GALLERY: [(f32, f32, &str); 7] = [
     (1920.0, 1080.0, "THE MENU ART. RENDERED IN BLENDER, FROM A SCRIPT"),
     (600.0, 600.0, "KEY ART: THE LOGO IS REAL GEOMETRY IN THE SCENE"),
     (960.0, 540.0, "THE HORDE AT WAVE 12"),
-    (960.0, 540.0, "A TITAN DOWN THE ROAD"),
+    (960.0, 540.0, "A TITAN INSIDE THE WALLS"),
     (960.0, 540.0, "QUIET BEFORE THE FIRST WAVE"),
     (1400.0, 400.0, "THE LOGO"),
     (256.0, 256.0, "THE ICON"),
@@ -165,6 +182,8 @@ pub struct FrameData {
     pub damage: f32,
     pub chroma: f32,
     pub desaturate: f32,
+    /// Mist lying on the ground, 0..1.
+    pub mist: f32,
     pub menu: Option<MenuView>,
 }
 
@@ -194,6 +213,7 @@ impl FrameData {
             damage: 0.0,
             chroma: 0.0,
             desaturate: 0.0,
+            mist: 0.0,
             menu: None,
         }
     }
@@ -217,6 +237,7 @@ struct Globals {
     view_proj: [[f32; 4]; 4],
     sun_vp: [[f32; 4]; 4],
     flash_vp: [[f32; 4]; 4],
+    sky_vp: [[f32; 4]; 4],
     cam_pos: [f32; 4],
     sun_dir: [f32; 4],
     sun_color: [f32; 4],
@@ -336,12 +357,14 @@ pub struct Renderer {
     grid_buf: wgpu::Buffer,
     sun_buf: wgpu::Buffer,
     flash_buf: wgpu::Buffer,
+    sky_buf: wgpu::Buffer,
     post_buf: wgpu::Buffer,
     ui_uniform: wgpu::Buffer,
 
     scene_bind: wgpu::BindGroup,
     sun_bind: wgpu::BindGroup,
     flash_bind: wgpu::BindGroup,
+    sky_bind: wgpu::BindGroup,
     decal_bind: wgpu::BindGroup,
     ui_bind: wgpu::BindGroup,
 
@@ -363,6 +386,7 @@ pub struct Renderer {
     clamp_sampler: wgpu::Sampler,
     sun_view: wgpu::TextureView,
     flash_view: wgpu::TextureView,
+    sky_view: wgpu::TextureView,
     decal_view: wgpu::TextureView,
 
     targets: SizedTargets,
@@ -591,6 +615,7 @@ impl Renderer {
         let grid_buf = dyn_buffer(device, "light grid", GRID_DIM * GRID_DIM * GRID_STRIDE * 4, U::STORAGE);
         let sun_buf = dyn_buffer(device, "sun vp", 64, U::UNIFORM);
         let flash_buf = dyn_buffer(device, "flash vp", 64, U::UNIFORM);
+        let sky_buf = dyn_buffer(device, "sky vp", 64, U::UNIFORM);
         let post_buf = dyn_buffer(device, "post", size_of::<PostUniform>(), U::UNIFORM);
         let ui_uniform = dyn_buffer(device, "ui uniform", 16, U::UNIFORM);
 
@@ -611,6 +636,7 @@ impl Renderer {
         };
         let sun_view = shadow_tex("sun shadow", SHADOW_SIZE);
         let flash_view = shadow_tex("flash shadow", FLASH_SHADOW_SIZE);
+        let sky_view = shadow_tex("sky occlusion", SKY_SIZE);
 
         let decal_view = device
             .create_texture(&wgpu::TextureDescriptor {
@@ -683,6 +709,7 @@ impl Renderer {
                 tex_entry(8, St::FRAGMENT, float),
                 sampler_entry(9, St::FRAGMENT, wgpu::SamplerBindingType::Filtering),
                 sampler_entry(10, St::FRAGMENT, wgpu::SamplerBindingType::Filtering),
+                tex_entry(11, St::FRAGMENT, T::Depth),
             ],
         });
         let scene_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -700,6 +727,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&detail_view) },
                 wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&clamp_sampler) },
                 wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(&wrap_sampler) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&sky_view) },
             ],
         });
 
@@ -716,6 +744,7 @@ impl Renderer {
         };
         let sun_bind = single_uniform_bind(&sun_buf);
         let flash_bind = single_uniform_bind(&flash_buf);
+        let sky_bind = single_uniform_bind(&sky_buf);
 
         let decal_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("decal"),
@@ -991,11 +1020,13 @@ impl Renderer {
             grid_buf,
             sun_buf,
             flash_buf,
+            sky_buf,
             post_buf,
             ui_uniform,
             scene_bind,
             sun_bind,
             flash_bind,
+            sky_bind,
             decal_bind,
             ui_bind,
             scene_pipe,
@@ -1015,6 +1046,7 @@ impl Renderer {
             clamp_sampler,
             sun_view,
             flash_view,
+            sky_view,
             decal_view,
             targets,
             ranges_used: Vec::with_capacity(MESH_COUNT),
@@ -1203,6 +1235,14 @@ impl Renderer {
         let snap_y = (origin.y / texel).round() * texel - origin.y;
         sun_vp = Mat4::from_translation(Vec3::new(snap_x, snap_y, 0.0)) * sun_vp;
 
+        // Straight down on the same patch of ground, for ambient occlusion. Snapped the same way.
+        let sky_view = look_at_rh(frame.focus + Vec3::Y * 70.0, frame.focus, Vec3::NEG_Z);
+        let mut sky_vp = ortho_rh(44.0, 1.0, 150.0) * sky_view;
+        let origin = sky_vp.project_point3(Vec3::ZERO);
+        let texel = 2.0 / SKY_SIZE as f32;
+        let snap = Vec3::new((origin.x / texel).round() * texel - origin.x, (origin.y / texel).round() * texel - origin.y, 0.0);
+        sky_vp = Mat4::from_translation(snap) * sky_vp;
+
         let (flash_vp, flash_pos, flash_dir, flash_col) = if let Some(f) = frame.flashlight {
             let fov = (f.cos_outer.clamp(-1.0, 1.0).acos() * 2.05).clamp(0.2, 2.8);
             let up = if f.dir.y.abs() > 0.95 { Vec3::Z } else { Vec3::Y };
@@ -1221,6 +1261,7 @@ impl Renderer {
             view_proj: frame.view_proj.to_cols_array_2d(),
             sun_vp: sun_vp.to_cols_array_2d(),
             flash_vp: flash_vp.to_cols_array_2d(),
+            sky_vp: sky_vp.to_cols_array_2d(),
             cam_pos: [frame.cam_pos.x, frame.cam_pos.y, frame.cam_pos.z, frame.time],
             sun_dir: frame.sun_dir.extend(0.0).to_array(),
             sun_color: frame.sun_color.extend(0.0).to_array(),
@@ -1231,11 +1272,12 @@ impl Renderer {
             flash_dir,
             flash_color: flash_col,
             grid,
-            map: [self.map_half, self.map_half * 1.8, 0.0, 0.0],
+            map: [self.map_half, self.map_half * 1.8, frame.mist, 0.0],
         };
         queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&g));
         queue.write_buffer(&self.sun_buf, 0, bytemuck::cast_slice(&sun_vp.to_cols_array_2d()));
         queue.write_buffer(&self.flash_buf, 0, bytemuck::cast_slice(&flash_vp.to_cols_array_2d()));
+        queue.write_buffer(&self.sky_buf, 0, bytemuck::cast_slice(&sky_vp.to_cols_array_2d()));
         let post = PostUniform {
             a: [frame.exposure, frame.bloom, frame.time % 100.0, frame.vignette],
             b: [frame.damage, frame.chroma, frame.desaturate, if self.manual_gamma { 1.0 } else { 0.0 }],
@@ -1318,6 +1360,7 @@ impl Renderer {
             }
         };
         shadow_pass(&mut enc, &self.sun_view, &self.sun_bind, self);
+        shadow_pass(&mut enc, &self.sky_view, &self.sky_bind, self);
         // Keep the flashlight map cleared even when off (it is not sampled then).
         if frame.flashlight.is_some() {
             shadow_pass(&mut enc, &self.flash_view, &self.flash_bind, self);
@@ -1539,7 +1582,7 @@ fn build_menu_art(
     let device = &gpu.device;
     let (bg, aspect) = upload_art(gpu, "menu background", include_bytes!("../../assets/menu_bg.png"));
     let (logo, _) = upload_art(gpu, "menu logo", include_bytes!("../../assets/menu_logo.png"));
-    let pictures: Vec<wgpu::TextureView> = GALLERY_FILES.iter().map(|f| upload_art(gpu, "gallery", f).0).collect();
+    let pictures: Vec<wgpu::TextureView> = GALLERY_FILES.iter().chain(&PORTRAIT_FILES).map(|f| upload_art(gpu, "gallery", f).0).collect();
     let uniform = dyn_buffer(device, "menu uniform", 48, wgpu::BufferUsages::UNIFORM);
     let float = wgpu::TextureSampleType::Float { filterable: true };
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

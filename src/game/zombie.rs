@@ -50,6 +50,9 @@ pub struct Zombie {
     pub stagger: f32,
     /// How long this zombie has wanted to move without getting anywhere.
     pub stuck_t: f32,
+    /// Leapers: time left in the air, and the player it has hold of, or -1.
+    pub leap_t: f32,
+    pub latch: i8,
     /// Client side only: where the server last said this zombie is.
     pub net_target: Vec2,
 }
@@ -75,6 +78,9 @@ impl Zombie {
         let wob = (t * 1.7 + self.id as f32).sin();
         let wob2 = (t * 1.1 + self.id as f32 * 1.7).cos();
 
+        if self.kind == ZKind::Leaper && !self.crawling {
+            return self.leaper_pose(t);
+        }
         if self.crawling || self.kind == ZKind::Crawler {
             // Dragging along the ground, face down, pulling with the arms.
             let reach = ph.sin();
@@ -159,6 +165,86 @@ impl Zombie {
     }
 }
 
+impl Zombie {
+    /// A leaper goes on all fours, flies flat out, and hangs on with everything it has.
+    fn leaper_pose(&self, t: f32) -> Pose {
+        let s = self.scale;
+        let f = vec3(self.facing.x, 0.0, self.facing.y).normalize_or(Vec3::Z);
+        let r = vec3(f.z, 0.0, -f.x);
+        let base = self.pos;
+        let w = |lx: f32, ly: f32, lz: f32| base + (r * lx + Vec3::Y * ly + f * lz) * s;
+        let ph = self.phase;
+        let k = (self.vel.length() / 3.0).min(1.0);
+        let id = self.id as f32;
+        let mut p = [Vec3::ZERO; JOINTS];
+        let sides = [(L_SHO, L_ELB, L_HAND, L_HIP, L_KNEE, L_FOOT, -1.0f32), (R_SHO, R_ELB, R_HAND, R_HIP, R_KNEE, R_FOOT, 1.0)];
+        if self.latch >= 0 {
+            // Arms over the victim's shoulders, legs round their waist, teeth at their throat.
+            let shake = (t * 23.0 + id).sin() * 0.025;
+            let lunge = if self.attack_t > 0.0 { (self.attack_t * 10.0).sin().max(0.0) } else { 0.0 };
+            p[PELVIS] = w(shake, 0.98, 0.1);
+            p[CHEST] = w(-shake, 1.25, 0.24);
+            p[NECK] = w(shake, 1.43, 0.33);
+            p[HEAD] = w(shake * 2.0, 1.52 - lunge * 0.05, 0.42 + lunge * 0.09);
+            for (sho, elb, hand, hip, knee, foot, side) in sides {
+                p[sho] = w(side * 0.2 - shake, 1.4, 0.28);
+                p[hand] = w(side * 0.25, 1.44 + shake, 0.66);
+                p[elb] = two_bone(p[sho], p[hand], 0.29 * s, 0.27 * s, r * side - Vec3::Y * 0.4);
+                p[hip] = w(side * 0.11 + shake, 0.95, 0.1);
+                p[foot] = w(side * 0.24, 0.78, 0.66);
+                p[knee] = two_bone(p[hip], p[foot], 0.43 * s, 0.43 * s, r * side + Vec3::Y * 0.5);
+            }
+            return p;
+        }
+        if self.leap_t > 0.0 {
+            // Flat out in the air, hands first.
+            p[PELVIS] = w(0.0, 0.72, -0.36);
+            p[CHEST] = w(0.0, 0.88, -0.02);
+            p[NECK] = w(0.0, 0.98, 0.2);
+            p[HEAD] = w(0.0, 1.07, 0.35);
+            for (sho, elb, hand, hip, knee, foot, side) in sides {
+                p[sho] = w(side * 0.2, 0.93, 0.1);
+                p[hand] = w(side * 0.27, 1.06, 0.72);
+                p[elb] = two_bone(p[sho], p[hand], 0.29 * s, 0.27 * s, r * side - Vec3::Y);
+                p[hip] = w(side * 0.11, 0.7, -0.38);
+                p[foot] = w(side * 0.16, 0.6, -1.14);
+                p[knee] = two_bone(p[hip], p[foot], 0.43 * s, 0.43 * s, -Vec3::Y);
+            }
+            return p;
+        }
+        // On all fours: prowling sideways while it waits, bounding when it comes for you.
+        let bound = (ph * 2.0).sin() * 0.06 * k;
+        let breathe = (t * 2.4 + id).sin() * 0.015;
+        let coil = if self.charge_t > 0.0 { 0.06 } else { 0.0 };
+        p[PELVIS] = w(0.0, 0.6 + bound - coil, -0.3);
+        p[CHEST] = w(0.0, 0.64 - bound * 0.5 + breathe, 0.12);
+        p[NECK] = w(0.0, 0.72 + breathe, 0.34);
+        p[HEAD] = w((t * 1.3 + id).sin() * 0.03, 0.83 + breathe, 0.5);
+        let attack = if self.attack_t > 0.0 { (self.attack_t * 3.5).min(1.0) } else { 0.0 };
+        for (sho, elb, hand, hip, knee, foot, side) in sides {
+            let off = if side < 0.0 { 0.0 } else { std::f32::consts::PI };
+            let (front, back) = (ph + off, ph + off + 1.6);
+            p[sho] = w(side * 0.2, 0.66 - bound * 0.5, 0.2);
+            p[hand] = w(side * 0.25, 0.05 + front.cos().max(0.0) * 0.16 * k, 0.44 + front.sin() * 0.3 * k);
+            if attack > 0.0 && side > 0.0 {
+                let stroke = (self.attack_t * 9.0).sin();
+                p[hand] = p[hand].lerp(w(0.14, 0.85 + stroke * 0.3, 0.72), attack);
+            }
+            p[elb] = two_bone(p[sho], p[hand], 0.29 * s, 0.27 * s, r * side * 0.8 - f * 0.4 + Vec3::Y * 0.3);
+            p[hip] = w(side * 0.12, 0.58 + bound - coil, -0.32);
+            p[foot] = w(side * 0.2, 0.06 + back.cos().max(0.0) * 0.18 * k, -0.5 + back.sin() * 0.3 * k);
+            p[knee] = two_bone(p[hip], p[foot], 0.43 * s, 0.43 * s, f + r * side * 0.5 + Vec3::Y * 0.7);
+        }
+        if self.spawn_t > 0.0 {
+            let drop = self.spawn_t.min(1.0) * 1.1 * s;
+            for j in &mut p {
+                j.y -= drop;
+            }
+        }
+        p
+    }
+}
+
 /// Clothes and skin picked by a per-zombie style number.
 pub fn style_colors(style: u32) -> ([f32; 3], [f32; 3], [f32; 3]) {
     const SKIN: [[f32; 3]; 5] = [[0.40, 0.46, 0.30], [0.48, 0.50, 0.36], [0.34, 0.38, 0.30], [0.50, 0.42, 0.36], [0.30, 0.34, 0.24]];
@@ -177,7 +263,7 @@ impl World {
         let hp_scale = 1.0 + 0.10 * n + 0.004 * n * n;
         let dmg_scale = 1.0 + 0.06 * n;
         let scale_var = if kind == ZKind::Titan { 1.0 } else { self.rng.range(0.93, 1.08) };
-        let style = self.rng.next_u32() & 0x00FF_FFFF | ((kind as u32) << 24);
+        let style = self.rng.next_u32() & 0x00FF_FFFF | (kind.style_tag() << 24);
         let at = Vec2::new(at.x.clamp(-HALF + 1.0, HALF - 1.0), at.y.clamp(-HALF + 1.0, HALF - 1.0));
         let id = self.next_zombie_id;
         self.next_zombie_id += 1;
@@ -220,6 +306,8 @@ impl World {
             last_cold: false,
             stagger: 0.0,
             stuck_t: 0.0,
+            leap_t: 0.0,
+            latch: -1,
             net_target: at,
         });
     }
@@ -263,6 +351,16 @@ impl World {
             }
         }
 
+        // Who a leaper has hold of is the leaper's to remember; the players are only told.
+        for p in &mut self.players {
+            p.latched = false;
+        }
+        for z in &self.zombies {
+            if let Some(p) = self.players.get_mut(z.latch.max(0) as usize).filter(|_| z.latch >= 0) {
+                p.latched = true;
+            }
+        }
+        let mut bites: Vec<(usize, f32, Vec3)> = Vec::new();
         let mut spit_requests: Vec<(Vec3, Vec3)> = Vec::new();
         let mut melee: Vec<(usize, i32)> = Vec::new();
         let mut screams: Vec<Vec2> = Vec::new();
@@ -291,18 +389,95 @@ impl World {
             }
 
             let p2 = z.pos2();
+            if z.kind == ZKind::Leaper {
+                if z.latch >= 0 {
+                    let v = z.latch as usize;
+                    let holding = self.players.get(v).is_some_and(|p| p.alive && p.connected && p.down_t <= 0.0);
+                    if holding && z.stun <= 0.0 && z.frost < 1.6 && !z.crawling {
+                        // Riding its victim, wherever they turn, and biting.
+                        let pl = &self.players[v];
+                        z.pos = vec3(pl.pos.x + pl.facing.x * LATCH_DIST, 0.0, pl.pos.z + pl.facing.y * LATCH_DIST);
+                        z.facing = -pl.facing;
+                        z.vel = Vec2::ZERO;
+                        z.knock = Vec2::ZERO;
+                        z.phase += dt * 9.0;
+                        if z.attack_t > 0.0 {
+                            z.attack_t += dt;
+                            if z.attack_t > 0.3 {
+                                z.attack_t = 0.0;
+                            }
+                        }
+                        if z.attack_cd <= 0.0 {
+                            z.attack_cd = zdef(ZKind::Leaper).attack_time;
+                            z.attack_t = 0.01;
+                            bites.push((v, z.damage, z.pos));
+                        }
+                        continue;
+                    }
+                    // Shaken off: it lands badly, and takes a moment to find its feet.
+                    if let Some(p) = self.players.get_mut(v) {
+                        p.latched = false;
+                    }
+                    z.latch = -1;
+                    z.stun = z.stun.max(0.9);
+                    z.special_t = 0.0;
+                    z.knock = -z.facing * 6.0;
+                }
+                if z.leap_t > 0.0 {
+                    z.leap_t -= dt;
+                    z.pos.y = leap_arc(1.0 - z.leap_t / LEAP_TIME);
+                    let mut np = (p2 + z.vel * dt).clamp(Vec2::splat(-HALF + 0.5), Vec2::splat(HALF - 0.5));
+                    np = self.map.resolve_circle(np, z.radius);
+                    // Walls stop a leap dead. It is a pounce, not a way over the barricades.
+                    if tile_index(tile_of(np)).is_some_and(|ti| self.blocked_tiles[ti]) {
+                        np = p2;
+                        z.vel = Vec2::ZERO;
+                    }
+                    z.phase += (np - p2).length();
+                    z.pos.x = np.x;
+                    z.pos.z = np.y;
+                    if z.leap_t <= 0.0 {
+                        z.leap_t = 0.0;
+                        z.pos.y = 0.0;
+                        z.special_t = 0.0;
+                        // A roll carries you out from under it, and nobody carries two.
+                        let caught = self.players.iter().position(|pl| {
+                            pl.alive && pl.connected && pl.down_t <= 0.0 && pl.roll_t <= 0.0 && !pl.latched && pl.pos2().distance(np) < LATCH_RANGE
+                        });
+                        match caught {
+                            Some(v) => {
+                                z.latch = v as i8;
+                                z.attack_cd = 0.3;
+                                z.vel = Vec2::ZERO;
+                                let pl = &mut self.players[v];
+                                pl.latched = true;
+                                pl.vel = Vec2::ZERO;
+                                bites.push((v, z.damage * 1.5, z.pos));
+                                roars.push((Sfx::Attack, z.pos, 0.9));
+                            }
+                            None => {
+                                z.stun = 1.0;
+                                z.vel *= 0.2;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                z.pos.y = 0.0;
+            }
             // Every zombie hunts whichever player is closest.
-            let mut nearest: Option<(Vec2, f32)> = None;
+            let mut nearest: Option<(Vec2, f32, Vec2)> = None;
             for pl in &self.players {
                 if pl.alive && pl.connected {
                     let d = pl.pos2().distance_squared(p2);
                     if nearest.is_none_or(|n| d < n.1) {
-                        nearest = Some((pl.pos2(), d));
+                        nearest = Some((pl.pos2(), d, pl.vel));
                     }
                 }
             }
             let palive = nearest.is_some();
             let ppos = nearest.map_or(Vec2::ZERO, |n| n.0);
+            let pvel = nearest.map_or(Vec2::ZERO, |n| n.2);
             let to_player = ppos - p2;
             let dplayer = to_player.length();
             let mut want = self.nav.direction(p2);
@@ -354,6 +529,40 @@ impl World {
                         z.special_t = 0.0;
                         screams.push(p2);
                         roars.push((Sfx::Scream, z.pos, 1.0));
+                    }
+                }
+                ZKind::Leaper => {
+                    // With the wave nearly over there is no more waiting: it comes straight in.
+                    let hurry = assault_ending && count < 12;
+                    if palive && dplayer < 16.0 && dplayer > 0.05 && z.stun <= 0.0 && z.frost < 1.0 && !z.crawling {
+                        let dir = to_player / dplayer;
+                        chase_player = true;
+                        if z.charge_t > 0.0 {
+                            want = dir;
+                            if dplayer < LEAP_RANGE && dplayer > 1.2 && z.touching < 0 {
+                                // Aimed at where its victim is heading, so standing still is no defence,
+                                // and neither is walking in a straight line.
+                                let to = (to_player + pvel * LEAP_TIME * 0.6).clamp_length_max(LEAP_RANGE * 1.2);
+                                z.charge_t = 0.0;
+                                z.leap_t = LEAP_TIME;
+                                z.vel = to / LEAP_TIME;
+                                z.facing = to.normalize_or(dir);
+                                roars.push((Sfx::Leap, z.pos, 1.0));
+                            }
+                        } else if z.special_t > LEAP_COOLDOWN && dplayer > 2.0 {
+                            z.special_t = 0.0;
+                            z.charge_t = 1.3;
+                            want = dir;
+                        } else if !hurry {
+                            // Out of reach, circling, and never taking its eyes off you.
+                            let side = if z.id.is_multiple_of(2) { 1.0 } else { -1.0 };
+                            let tangent = Vec2::new(-dir.y, dir.x) * side;
+                            if dplayer < 8.5 {
+                                want = (tangent * 0.4 - dir).normalize_or(-dir);
+                            } else if dplayer < 12.0 {
+                                want = tangent * 0.55;
+                            }
+                        }
                     }
                 }
                 ZKind::Brute => {
@@ -469,6 +678,9 @@ impl World {
 
         for i in burrow {
             self.burrow_zombie(i);
+        }
+        for (v, dmg, from) in bites {
+            self.hurt_player(v, dmg, from, super::player::DeathCause::Zombie);
         }
         for (s, p, g) in roars {
             self.snd(s, p, g);

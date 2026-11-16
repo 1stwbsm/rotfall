@@ -37,7 +37,85 @@ scene.view_settings.look = "AgX - High Contrast"
 scene.view_settings.exposure = -0.9
 
 
-def material(name, color=(0.5, 0.5, 0.5), rough=0.7, metal=0.0, emit=None, strength=0.0):
+def weather(m, scale, bump_from=None, bump=0.0, rough_from=None, wet=False):
+    """What stops a surface looking like moulded plastic: grime in broad patches, a fine grain that
+    breaks up every highlight, pitting, and a duller shine. Works on any Principled material."""
+    t = m.node_tree
+    p = t.nodes["Principled BSDF"]
+    co = t.nodes.new("ShaderNodeTexCoord")
+    # Wet ground keeps its mirror shine: that is rain, not plastic.
+    p.inputs["Specular IOR Level"].default_value = 0.5 if wet else 0.28
+
+    def noise(k, detail, rough=0.6):
+        n = t.nodes.new("ShaderNodeTexNoise")
+        n.inputs["Scale"].default_value = scale * k
+        n.inputs["Detail"].default_value = detail
+        n.inputs["Roughness"].default_value = rough
+        t.links.new(co.outputs["Object"], n.inputs["Vector"])
+        return n
+
+    def ranged(src, lo, hi, out_lo, out_hi):
+        r = t.nodes.new("ShaderNodeMapRange")
+        r.inputs["From Min"].default_value = lo
+        r.inputs["From Max"].default_value = hi
+        r.inputs["To Min"].default_value = out_lo
+        r.inputs["To Max"].default_value = out_hi
+        t.links.new(src, r.inputs["Value"])
+        return r.outputs[0]
+
+    def math(op, a, b):
+        n = t.nodes.new("ShaderNodeMath")
+        n.operation = op
+        n.use_clamp = True
+        for i, v in enumerate((a, b)):
+            if isinstance(v, float):
+                n.inputs[i].default_value = v
+            else:
+                t.links.new(v, n.inputs[i])
+        return n.outputs[0]
+
+    grime = noise(0.17, 5, 0.7)
+    grain = noise(11.0, 3, 0.8)
+    pits = t.nodes.new("ShaderNodeTexVoronoi")
+    pits.inputs["Scale"].default_value = scale * 5.0
+    t.links.new(co.outputs["Object"], pits.inputs["Vector"])
+
+    # Colour: darker and dirtier in patches, and speckled at the scale of the grain.
+    base = p.inputs["Base Color"]
+    shade = math("MULTIPLY", ranged(grime.outputs[0], 0.3, 0.72, 0.62, 1.12), ranged(grain.outputs[0], 0.25, 0.75, 0.84, 1.1))
+    mul = t.nodes.new("ShaderNodeVectorMath")
+    mul.operation = "SCALE"
+    if base.links:
+        t.links.new(base.links[0].from_socket, mul.inputs[0])
+    else:
+        mul.inputs[0].default_value = base.default_value[:3]
+    t.links.new(shade, mul.inputs["Scale"])
+    t.links.new(mul.outputs[0], base)
+
+    # Shine: never even. Dirt is dull, and the grain scatters what is left.
+    rough = p.inputs["Roughness"]
+    start = rough_from if rough_from is not None else rough.default_value
+    r = math("ADD", start, ranged(grain.outputs[0], 0.2, 0.8, -0.04, 0.05) if wet else ranged(grain.outputs[0], 0.2, 0.8, -0.1, 0.16))
+    if not wet:
+        r = math("ADD", r, ranged(grime.outputs[0], 0.3, 0.72, 0.18, -0.04))
+    t.links.new(r, rough)
+
+    # Relief: the broad shape if there is one, then pitting, then grain on top.
+    normal = None
+    for height, strength, distance in ((bump_from, bump, 1.0), (pits.outputs["Distance"], 0.25, 0.3), (grain.outputs[0], 0.4, 0.2)):
+        if height is None:
+            continue
+        bp = t.nodes.new("ShaderNodeBump")
+        bp.inputs["Strength"].default_value = strength
+        bp.inputs["Distance"].default_value = distance
+        t.links.new(height, bp.inputs["Height"])
+        if normal is not None:
+            t.links.new(normal, bp.inputs["Normal"])
+        normal = bp.outputs[0]
+    t.links.new(normal, p.inputs["Normal"])
+
+
+def material(name, color=(0.5, 0.5, 0.5), rough=0.7, metal=0.0, emit=None, strength=0.0, plain=False):
     m = bpy.data.materials.new(name)
     m.use_nodes = True
     b = m.node_tree.nodes["Principled BSDF"]
@@ -47,12 +125,15 @@ def material(name, color=(0.5, 0.5, 0.5), rough=0.7, metal=0.0, emit=None, stren
     if emit:
         b.inputs["Emission Color"].default_value = (*emit, 1)
         b.inputs["Emission Strength"].default_value = strength
+    elif not plain and rough > 0.1:
+        # Water stays a mirror, and lights stay lights. Everything else has been out in the weather.
+        weather(m, 6.0)
     return m
 
 
-def noisy(name, a, b, scale=3.0, rough=(0.45, 0.9), metal=0.0, bump=0.25):
-    """Two-colour noise material with matching roughness and bump."""
-    m = material(name, metal=metal)
+def noisy(name, a, b, scale=3.0, rough=(0.45, 0.9), metal=0.0, bump=0.25, wet=False, weathered=True):
+    """Two-colour noise material with matching roughness and bump, weathered."""
+    m = material(name, metal=metal, plain=True)
     t = m.node_tree
     p = t.nodes["Principled BSDF"]
     co = t.nodes.new("ShaderNodeTexCoord")
@@ -72,11 +153,14 @@ def noisy(name, a, b, scale=3.0, rough=(0.45, 0.9), metal=0.0, bump=0.25):
     rr.inputs["To Min"].default_value = rough[0]
     rr.inputs["To Max"].default_value = rough[1]
     t.links.new(n.outputs[0], rr.inputs["Value"])
-    t.links.new(rr.outputs[0], p.inputs["Roughness"])
-    bp = t.nodes.new("ShaderNodeBump")
-    bp.inputs["Strength"].default_value = bump
-    t.links.new(n.outputs[0], bp.inputs["Height"])
-    t.links.new(bp.outputs[0], p.inputs["Normal"])
+    if weathered:
+        weather(m, scale, bump_from=n.outputs[0], bump=bump, rough_from=rr.outputs[0], wet=wet)
+    else:
+        t.links.new(rr.outputs[0], p.inputs["Roughness"])
+        bp = t.nodes.new("ShaderNodeBump")
+        bp.inputs["Strength"].default_value = bump
+        t.links.new(n.outputs[0], bp.inputs["Height"])
+        t.links.new(bp.outputs[0], p.inputs["Normal"])
     return m
 
 
@@ -146,7 +230,7 @@ def rust_text(text, voxel=0.0045, dent=0.024):
     bpy.ops.object.convert(target="MESH")
     ob = bpy.context.view_layer.objects.active
     # Rust and blood eat into plate steel; the noise also dents the geometry.
-    m = noisy("rust", (0.09, 0.03, 0.012), (0.56, 0.47, 0.36), scale=5.0, rough=(0.3, 0.85), metal=0.85, bump=0.8)
+    m = noisy("rust", (0.09, 0.03, 0.012), (0.56, 0.47, 0.36), scale=5.0, rough=(0.3, 0.85), metal=0.85, bump=0.8, weathered=False)
     ob.data.materials.append(m)
     bpy.ops.object.mode_set(mode="EDIT")
     bpy.ops.mesh.select_all(action="SELECT")
@@ -250,7 +334,7 @@ if MODE == "icon":
     sys.exit(0)
 
 # ------------------------------------------------------------------ materials
-asphalt = noisy("asphalt", (0.012, 0.012, 0.014), (0.05, 0.05, 0.052), scale=18, rough=(0.1, 0.62), bump=0.45)
+asphalt = noisy("asphalt", (0.012, 0.012, 0.014), (0.05, 0.05, 0.052), scale=18, rough=(0.1, 0.62), bump=0.45, wet=True)
 concrete = noisy("concrete", (0.05, 0.045, 0.04), (0.2, 0.17, 0.14), scale=2.2, rough=(0.65, 0.95), bump=0.7)
 brick = noisy("brick", (0.07, 0.025, 0.018), (0.19, 0.08, 0.05), scale=3.0, rough=(0.7, 0.95), bump=0.8)
 rust = noisy("rustcar", (0.05, 0.02, 0.01), (0.21, 0.09, 0.05), scale=6, rough=(0.35, 0.9), metal=0.5, bump=0.6)
